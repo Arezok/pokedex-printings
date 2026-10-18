@@ -209,6 +209,10 @@ a.chip{text-decoration:none}
 .cf-checks{display:flex;flex-direction:column;gap:8px;margin-top:14px}
 .cf-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px}
 @media (max-width:560px){.ff-grid{grid-template-columns:1fr}.bname{width:100%}}
+.tg-acts{display:flex;flex-wrap:wrap;gap:6px}
+.tg-acts .btn{flex:1 1 auto;padding:0 10px}
+.tg-acts .x{flex:none;width:34px;padding:0}
+.toolbar{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;margin:14px 0}
 .toast{position:fixed;left:50%;bottom:calc(18px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);z-index:60;max-width:min(92vw,460px);padding:10px 16px;border-radius:12px;background:var(--ink);color:var(--bg);font-size:14px;text-align:center}
 
 @media (max-width:640px){
@@ -649,6 +653,7 @@ function visibleCards(v) {
   else if (v.rarity) list = list.filter(c => rarityOf(c) === v.rarity);
   if (v.own === 'have') list = list.filter(c => COL[c.id]);
   else if (v.own === 'missing') list = list.filter(c => !COL[c.id]);
+  else if (v.own === 'target') list = list.filter(c => TGT[c.id]);
   else if (v.own === 'binder') { const b = activeB(); list = list.filter(c => inB(b, c.id)); }
   return list;
 }
@@ -662,6 +667,7 @@ const httpUrl = u => (typeof u === 'string' && /^https?:\/\//.test(u) ? u.slice(
 
 let COL = {};                                      // cardId -> {d,n,s,y,no,r,th,p,t,cu}   cards I own
 let BND = { active: '', list: [] };                // binders: {id,name,rows,cols,ph,cards:[cardId]}
+let TGT = {};                                      // cards I am hunting for: cardId -> same record shape as COL
 let CUS = {};                                      // printings I added by hand: cardId -> {d,n,s,no,y,l,r,a,p,u,note,t}
 const IMGS = new Map();                            // custom cardId -> photo (data URL)
 
@@ -750,6 +756,8 @@ function loadMine() {
   if (!col || typeof col !== 'object') { col = LS.get('own', {}) || {}; migrated = true; }   // earlier version: one binder, saved as "own"
   COL = {};
   for (const [id, r] of Object.entries(col)) { const c = cleanRec(r); if (c) COL[id] = c; }
+  TGT = {};
+  for (const [id, r] of Object.entries(LS.get('tgt', {}) || {})) { const c = cleanRec(r); if (c && !COL[id]) TGT[id] = c; }
   const saved = LS.get('bnd', null);
   const list = saved && Array.isArray(saved.list) ? saved.list.map(cleanBinder).filter(Boolean) : [];
   let fresh = false;
@@ -781,8 +789,11 @@ function persist(key, val) {
 const saveCol = () => persist('col', COL);
 const saveBnd = () => persist('bnd', BND);
 const saveCus = () => persist('cus', CUS);
+const saveTgt = () => persist('tgt', TGT);
 let saveColT;
 const saveColSoon = () => { clearTimeout(saveColT); saveColT = setTimeout(saveCol, 600); };
+let saveTgtT;
+const saveTgtSoon = () => { clearTimeout(saveTgtT); saveTgtT = setTimeout(saveTgt, 600); };
 
 const activeB = () => BND.list.find(b => b.id === BND.active) || BND.list[0];
 const inB = (b, id) => b.cards.includes(id);
@@ -822,6 +833,7 @@ function toggleCol(v, c) {
     if (names.length) toast('Removed from your collection and from ' + names.join(', ') + '.');
   } else {
     COL[c.id] = recFor(c, v.id);
+    if (TGT[c.id]) { delete TGT[c.id]; saveTgt(); }
     askPersist();
   }
   saveCol();
@@ -833,10 +845,18 @@ function toggleBnd(v, c) {
   if (inB(b, c.id)) b.cards = b.cards.filter(x => x !== c.id);
   else {
     if (!COL[c.id]) { COL[c.id] = recFor(c, v.id); saveCol(); }
+    if (TGT[c.id]) { delete TGT[c.id]; saveTgt(); }
     b.cards.push(c.id);
     askPersist();
   }
   saveBnd();
+  afterChange(v, c);
+}
+
+function toggleTgt(v, c) {
+  if (COL[c.id]) return;
+  if (TGT[c.id]) delete TGT[c.id]; else TGT[c.id] = recFor(c, v.id);
+  saveTgt();
   afterChange(v, c);
 }
 
@@ -853,13 +873,15 @@ function afterChange(v, c) {
 
 /* keep the saved price and rarity of collected cards current as fresh data arrives */
 function syncOwned(c) {
-  const r = COL[c.id];
-  if (!r) return;
   const p = primaryPrice(c), rar = rarityOf(c);
-  let changed = false;
-  if (p !== r.p) { r.p = p; changed = true; }
-  if (rar && rar !== r.r) { r.r = rar; changed = true; }
-  if (changed) saveColSoon();
+  for (const [map, save] of [[COL, saveColSoon], [TGT, saveTgtSoon]]) {
+    const r = map[c.id];
+    if (!r) continue;
+    let changed = false;
+    if (p !== r.p) { r.p = p; changed = true; }
+    if (rar && rar !== r.r) { r.r = rar; changed = true; }
+    if (changed) save();
+  }
 }
 
 const SVGNS = 'http://www.w3.org/2000/svg';
@@ -883,6 +905,12 @@ function syncPocket(el, c) {
   b.setAttribute('aria-pressed', String(ib));
   b.setAttribute('aria-label', (ib ? 'Remove from binder “' : 'Add to binder “') + bn.name + '”: ' + c.name + ' ' + numLabel(c));
   b.title = ib ? `In “${bn.name}”` : `Add to “${bn.name}”`;
+  const t = el.querySelector('.tgt'), tg = !!TGT[c.id];
+  t.hidden = on;
+  t.setAttribute('aria-pressed', String(tg));
+  t.textContent = tg ? '★' : '☆';
+  t.setAttribute('aria-label', (tg ? 'Remove from my target list: ' : 'Add to my target list: ') + c.name + ' ' + numLabel(c));
+  t.title = tg ? 'On my target list' : 'Add to my target list';
 }
 
 function syncLb(c) {
@@ -893,6 +921,13 @@ function syncLb(c) {
   a.textContent = on ? '✓ In my collection' : '+ Add to collection';
   b.classList.toggle('on', ib); b.setAttribute('aria-pressed', String(ib));
   b.textContent = ib ? `✓ In “${bn.name}”` : `+ Add to “${bn.name}”`;
+  const t = $('#lbTgt');
+  if (t) {
+    const tg = !!TGT[c.id];
+    t.hidden = on;
+    t.classList.toggle('on', tg); t.setAttribute('aria-pressed', String(tg));
+    t.textContent = tg ? '★ On my target list' : '☆ Add to target list';
+  }
 }
 
 /* the binder that the little binder buttons add to */
@@ -1065,9 +1100,10 @@ function openCardForm(v, existing) {
 function deleteCustom(v, c) {
   delete CUS[c.id];
   delete COL[c.id];
+  delete TGT[c.id];
   pruneBinders();
   ImgStore.del(c.id);
-  saveCus(); saveCol(); saveBnd();
+  saveCus(); saveCol(); saveBnd(); saveTgt();
   v.cards = v.cards.filter(x => x.id !== c.id);
   rebuildOwn(); refreshTileBadges(); updateBinderBadge();
   location.replace('#/p/' + v.id);
@@ -1081,7 +1117,7 @@ function exportAll() {
   for (const id of Object.keys(CUS)) if (IMGS.has(id)) images[id] = IMGS.get(id);
   const data = {
     app: 'pokedex-printings', version: 2, exported: new Date().toISOString(),
-    collection: COL, binders: BND.list, active: BND.active, custom: CUS, images
+    collection: COL, targets: TGT, binders: BND.list, active: BND.active, custom: CUS, images
   };
   const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
@@ -1127,8 +1163,10 @@ function importFile(e) {
         const b = activeB();   // an export from the earlier single-binder version: those cards were in the binder
         for (const id of Object.keys(cards)) if (COL[id] && !b.cards.includes(id)) b.cards.push(id);
       }
+      if (v2) for (const [id, r] of Object.entries(data.targets || {})) { const rec = cleanRec(r); if (rec && !COL[id] && !TGT[id]) TGT[id] = rec; }
+      for (const id of Object.keys(TGT)) if (COL[id]) delete TGT[id];
       pruneBinders();
-      saveCol(); saveBnd(); saveCus();
+      saveCol(); saveBnd(); saveCus(); saveTgt();
       rebuildOwn(); refreshTileBadges(); updateBinderBadge(); refreshBsels(); updateBackupNote();
       if (V && V.cards) { V.cards = V.cards.filter(c => !c.custom).concat(customsFor(V.id)); renderGallery(V); buildChips(V); updateMeta(V); }
       if (mode === 'binder') renderBinder();
@@ -1142,7 +1180,7 @@ function importFile(e) {
 
 function updateBackupNote() {
   const el = $('#bkNote');
-  const n = Object.keys(COL).length + Object.keys(CUS).length;
+  const n = Object.keys(COL).length + Object.keys(CUS).length + Object.keys(TGT).length;
   const last = LS.get('lastExport', 0);
   el.hidden = !(n && (!last || Date.now() - last > 14 * DAY));
   if (el.hidden) return;
@@ -1253,7 +1291,7 @@ function renderShell(v) {
   sort.value = v.sort;
 
   const ownSel = h('select', { id: 'ownSel', onchange: e => { v.own = e.target.value; renderGallery(v); } },
-    h('option', { value: 'all' }, 'All printings'), h('option', { value: 'have' }, 'In my collection'), h('option', { value: 'missing' }, 'Not in my collection'), h('option', { value: 'binder' }, 'In the selected binder'));
+    h('option', { value: 'all' }, 'All printings'), h('option', { value: 'have' }, 'In my collection'), h('option', { value: 'missing' }, 'Not in my collection'), h('option', { value: 'binder' }, 'In the selected binder'), h('option', { value: 'target' }, 'On my target list'));
 
   const cw = LS.get('cw', 150);
   document.documentElement.style.setProperty('--cw', cw + 'px');
@@ -1364,6 +1402,8 @@ function updateMeta(v) {
   if (art) parts.push(`${art} art rare${art === 1 ? '' : 's'}`);
   const have = v.cards.filter(c => COL[c.id]).length;
   if (have) parts.push(`${have} in your collection`);
+  const tg = v.cards.filter(c => TGT[c.id]).length;
+  if (tg) parts.push(`${tg} on your target list`);
   const bn = activeB(), inb = v.cards.filter(c => inB(bn, c.id)).length;
   if (inb) parts.push(`${inb} in “${bn.name}”`);
   v.el.meta.textContent = parts.join(' · ')
@@ -1416,7 +1456,8 @@ function pocket(v, c) {
     h('span', { class: 'set', title: setName(c) }, setName(c) + (yr ? ' · ' + yr : '')));
   const own = h('button', { type: 'button', class: 'own', onclick: () => toggleCol(v, c) });
   const bnd = h('button', { type: 'button', class: 'bnd', onclick: () => toggleBnd(v, c) }, bookIcon());
-  const el = h('div', { class: 'pocket', dataset: { cid: c.id } }, link, cap, h('div', { class: 'pk-btns' }, own, bnd));
+  const tgt = h('button', { type: 'button', class: 'tgt', onclick: () => toggleTgt(v, c) });
+  const el = h('div', { class: 'pocket', dataset: { cid: c.id } }, link, cap, h('div', { class: 'pk-btns' }, own, bnd, tgt));
   v.caps.set(c.id, cap);
   v.pockets.set(c.id, el);
   fillCap(cap, c);
@@ -1486,6 +1527,7 @@ function openLightbox(cardId) {
     const acts = [
       h('button', { type: 'button', id: 'lbCol', class: 'btn', onclick: () => toggleCol(v, c) }),
       h('button', { type: 'button', id: 'lbBnd', class: 'btn', onclick: () => toggleBnd(v, c) }),
+      h('button', { type: 'button', id: 'lbTgt', class: 'btn ghost', onclick: () => toggleTgt(v, c) }),
       BND.list.length > 1 ? binderSelect() : null,
       c.custom ? null : h('a', { class: 'btn ghost', href: tcgUrl(c), target: '_blank', rel: 'noopener noreferrer' }, c.tcgUrl ? 'View on TCGplayer ↗' : 'Search TCGplayer ↗'),
       c.custom ? h('button', { type: 'button', id: 'lbEdit', class: 'btn ghost', onclick: () => openCardForm(v, c) }, 'Edit') : null,
@@ -1591,10 +1633,10 @@ function showBinder(key) {
 }
 
 function tabKey(key) {
-  if (key === 'col') return 'col';
+  if (key === 'col' || key === 'tgt') return key;
   if (key && BND.list.some(b => b.id === key)) return key;
   const saved = LS.get('tab', '');
-  if (saved === 'col' || BND.list.some(b => b.id === saved)) return saved;
+  if (saved === 'col' || saved === 'tgt' || BND.list.some(b => b.id === saved)) return saved;
   return BND.active;
 }
 
@@ -1637,10 +1679,11 @@ function renderBinder(key) {
   const k = tabKey(key || curTab);
   curTab = k;
   LS.set('tab', k);
-  if (k !== 'col' && BND.active !== k) { BND.active = k; saveBnd(); refreshBsels(); }
+  if (k !== 'col' && k !== 'tgt' && BND.active !== k) { BND.active = k; saveBnd(); refreshBsels(); }
 
   const tabs = h('nav', { class: 'chips wrap', 'aria-label': 'Collection and binders' },
     h('a', { class: 'chip', href: '#/binder/col', 'aria-current': k === 'col' ? 'page' : null }, 'Collection', h('i', null, Object.keys(COL).length)),
+    h('a', { class: 'chip', href: '#/binder/tgt', 'aria-current': k === 'tgt' ? 'page' : null }, 'Targets', h('i', null, Object.keys(TGT).length)),
     BND.list.map(b => h('a', {
       class: 'chip', href: '#/binder/' + encodeURIComponent(b.id), 'aria-current': k === b.id ? 'page' : null
     }, b.name, h('i', null, b.cards.filter(id => COL[id]).length))),
@@ -1649,7 +1692,7 @@ function renderBinder(key) {
   $('#binder').replaceChildren(
     h('div', { class: 'bhead' }, h('h1', null, 'My cards')),
     tabs,
-    k === 'col' ? collectionView() : binderView(BND.list.find(b => b.id === k)),
+    k === 'col' ? collectionView() : k === 'tgt' ? targetsView() : binderView(BND.list.find(b => b.id === k)),
     backupView());
 }
 
@@ -1772,6 +1815,79 @@ function colTile(r) {
       r.r ? h('span', { class: isArtRare(r.r) ? 'art-r' : '' }, r.r) : null,
       typeof r.p === 'number' ? h('span', { class: 'price' }, money(r.p)) : null,
       inN ? h('span', null, `In ${inN} binder${inN === 1 ? '' : 's'}`) : null));
+}
+
+function gotIt(id, toBinder) {
+  const r = TGT[id];
+  if (!r) return;
+  COL[id] = { ...r, t: Date.now() };
+  delete TGT[id];
+  const b = activeB();
+  if (toBinder && !b.cards.includes(id)) { b.cards.push(id); saveBnd(); }
+  saveCol(); saveTgt(); askPersist();
+  rebuildOwn(); refreshTileBadges(); updateBinderBadge();
+  toast(toBinder ? `Moved to your collection and “${b.name}”.` : 'Moved to your collection.');
+  renderBinder();
+}
+
+function dropTarget(id) {
+  delete TGT[id];
+  saveTgt();
+  renderBinder();
+}
+
+function targetsText(list, total) {
+  const lines = list.map(r => `${r.n} — ${r.s}${r.y ? ' (' + r.y + ')' : ''} ${r.no}${typeof r.p === 'number' ? ' — ' + money(r.p) : ''}`);
+  return lines.join('\n') + `\n\n${list.length} card${list.length === 1 ? '' : 's'}, about ${money(total)}`;
+}
+
+function targetsView() {
+  const key = LS.get('tsort', 'dex');
+  const cmp = {
+    dex: (a, b) => a.d - b.d || a.t - b.t,
+    price: (a, b) => (typeof b.p === 'number' ? b.p : -1) - (typeof a.p === 'number' ? a.p : -1) || a.d - b.d,
+    new: (a, b) => b.t - a.t
+  }[key] || ((a, b) => a.d - b.d);
+  const list = Object.entries(TGT).map(([id, r]) => ({ id, ...r })).sort(cmp);
+  const total = list.reduce((s, r) => s + (typeof r.p === 'number' ? r.p : 0), 0);
+  const unpriced = list.filter(r => typeof r.p !== 'number').length;
+
+  if (!list.length) return h('p', { class: 'state' }, 'No targets yet. Tap the ☆ on any card to add it here. Cards you add to your collection leave this list on their own.');
+
+  const sel = h('select', { id: 'tSort', onchange: e => { LS.set('tsort', e.target.value); renderBinder(); } },
+    h('option', { value: 'dex' }, 'Pokédex order'), h('option', { value: 'price' }, 'Highest price first'), h('option', { value: 'new' }, 'Newest added first'));
+  sel.value = key;
+  const copy = h('button', {
+    type: 'button', class: 'btn ghost sm', id: 'copyTargets',
+    onclick: async () => {
+      try { await navigator.clipboard.writeText(targetsText(list, total)); toast('Copied the list.'); }
+      catch { toast('Could not copy. Your browser blocked it.'); }
+    }
+  }, 'Copy list');
+
+  return h('div', null,
+    h('p', { class: 'bsum', style: 'margin-top:14px' },
+      h('b', null, list.length.toLocaleString()), ` card${list.length === 1 ? '' : 's'} to find · about `, h('b', null, money(total)),
+      ' at TCGplayer market prices' + (unpriced ? ` (${unpriced} without a price)` : '')),
+    h('div', { class: 'toolbar' }, h('label', { class: 'field', for: 'tSort' }, 'Order', sel), copy),
+    h('div', { class: 'gallery' }, list.map(tgtTile)));
+}
+
+function tgtTile(r) {
+  const img = r.cu ? customImg(r.id) : r.th;
+  return h('div', { class: 'pocket' },
+    h('a', { class: 'pk-link', href: `#/p/${r.d}/${encodeURIComponent(r.id)}` },
+      h('span', { class: 'art' }, img
+        ? h('img', { src: img, alt: `${r.n}, ${r.s} ${r.no}`, width: 245, height: 337, loading: 'lazy', decoding: 'async' })
+        : h('div', { class: 'noimg' }, h('span', null, r.n), h('small', null, 'No image'))),
+      h('span', { class: 'set', title: r.s }, r.s + (r.y ? ' · ' + r.y : ''))),
+    h('span', { class: 'cap' }, h('span', null, r.n), h('span', null, r.no),
+      r.r ? h('span', { class: isArtRare(r.r) ? 'art-r' : '' }, r.r) : null,
+      typeof r.p === 'number' ? h('span', { class: 'price' }, money(r.p)) : null),
+    h('div', { class: 'tg-acts' },
+      h('button', { type: 'button', class: 'btn sm got', 'aria-label': 'Got it: ' + r.n + ' ' + r.no, onclick: () => gotIt(r.id, false) }, 'Got it'),
+      h('button', { type: 'button', class: 'btn ghost sm gotb', title: `Got it, and put it in “${activeB().name}”`, 'aria-label': 'Got it and add to binder: ' + r.n + ' ' + r.no, onclick: () => gotIt(r.id, true) }, '+ binder'),
+      h('button', { type: 'button', class: 'btn ghost sm x', 'aria-label': 'Remove from target list: ' + r.n + ' ' + r.no, onclick: () => dropTarget(r.id) }, '×')));
 }
 
 function backupView() {
