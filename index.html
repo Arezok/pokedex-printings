@@ -213,6 +213,17 @@ a.chip{text-decoration:none}
 .tg-acts .btn{flex:1 1 auto;padding:0 10px}
 .tg-acts .x{flex:none;width:34px;padding:0}
 .toolbar{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;margin:14px 0}
+.setgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.settile{display:flex;flex-direction:column;gap:6px;min-width:0;padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--surface);text-decoration:none}
+.settile:hover{border-color:var(--accent)}
+.settile .sl{display:grid;place-items:center;height:58px;padding:6px;border-radius:6px;background:#fff}
+.settile .sl img{max-width:100%;max-height:46px;object-fit:contain}
+.settile .sn{font:600 13px/1.25 var(--f-body)}
+.settile .sc{font:400 11px/1.4 var(--f-mono);color:var(--muted)}
+.setgroup h2{margin:24px 0 10px;font:700 18px/1.2 var(--f-display)}
+.hero-logo{width:132px;height:90px;object-fit:contain;flex:none;padding:8px;border-radius:10px;background:#fff}
+.cap .nm{color:var(--ink);font-weight:600}
+.lb-info dd a{text-decoration:underline}
 .toast{position:fixed;left:50%;bottom:calc(18px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);z-index:60;max-width:min(92vw,460px);padding:10px 16px;border-radius:12px;background:var(--ink);color:var(--bg);font-size:14px;text-align:center}
 
 @media (max-width:640px){
@@ -240,6 +251,7 @@ a.chip{text-decoration:none}
           <span class="sr">Search Pokémon by name or number</span>
           <input id="q" type="search" inputmode="search" enterkeyhint="search" autocomplete="off" placeholder="Search name or number">
         </label>
+        <a class="navlink" id="setsLink" href="#/sets">Sets</a>
         <a class="navlink" id="binderLink" href="#/binder">My cards <i id="binderCount">0</i></a>
       </div>
     </div>
@@ -270,6 +282,7 @@ a.chip{text-decoration:none}
   </section>
 
   <section id="poke" hidden></section>
+  <section id="sets" hidden></section>
   <section id="binder" hidden></section>
 </main>
 
@@ -397,13 +410,14 @@ const S = {
   details: LS.get('cd2', {}),         // cardId -> [rarity, illustrator, [[variant, market]], priceUpdated, fetchedAt]
   full: new Map(),                    // cardId -> full card json (this session)
   cards: new Map(),                   // pokemon id -> {cards, how, hidden}
+  setCards: new Map(),                // set id -> {cards, ...}
   ownByDex: new Map(),                // dex id -> [owned records, newest first]
   token: 0
 };
 const F = { q: '', gen: 0, own: 'all', first: null };
 let V = null;          // current Pokémon view
 let mode = '';
-let homeY = 0, binderY = 0;
+let homeY = 0, binderY = 0, setsY = 0;
 let persistDetailsOk = true;
 
 /* ---------- prices ---------- */
@@ -590,10 +604,10 @@ async function fetchDetail(id) {
   const c = await getJSON(`${API}/cards/${encodeURIComponent(id)}`);
   S.full.set(id, c);
   const pr = parsePricing(c);
-  S.details[id] = [c.rarity || '', c.illustrator || '', pr ? pr.p : [], pr ? pr.u : '', Date.now()];
+  S.details[id] = [c.rarity || '', c.illustrator || '', pr ? pr.p : [], pr ? pr.u : '', Date.now(), (Array.isArray(c.dexId) && c.dexId[0]) || 0, c.category || ''];
   return c;
 }
-const fresh = e => !!e && e.length >= 5 && Date.now() - e[4] < 2 * DAY;
+const fresh = e => !!e && e.length >= 7 && Date.now() - e[4] < 2 * DAY;
 
 function persistDetails() {
   if (!persistDetailsOk) return;
@@ -621,7 +635,13 @@ function numLabel(c) {
   return t ? `${c.localId}/${t}` : `#${c.localId}`;
 }
 
+const byNum = (a, b) => a.localId.localeCompare(b.localId, undefined, { numeric: true });
+const dexOfCard = c => (S.details[c.id] || [])[5] || 0;
+const isPokeCard = c => { const d = S.details[c.id]; return !d || !d[6] || /^pok/i.test(d[6]); };
+
 function sortCards(v) {
+  if (v.sort === 'num') return v.cards.slice().sort(byNum);
+  if (v.sort === 'dex') return v.cards.slice().sort((a, b) => (dexOfCard(a) || 1e9) - (dexOfCard(b) || 1e9) || byNum(a, b));
   const asc = v.sort === 'old';
   return v.cards.slice().sort((a, b) => {
     if (v.sort === 'price') {
@@ -649,6 +669,8 @@ function sortCards(v) {
 
 function visibleCards(v) {
   let list = sortCards(v);
+  if (v.set && !v.all) list = list.filter(isPokeCard);
+  if (v.setF) list = list.filter(c => c.setId === v.setF);
   if (v.rarity === '__art') list = list.filter(c => isArtRare(rarityOf(c)));
   else if (v.rarity) list = list.filter(c => rarityOf(c) === v.rarity);
   if (v.own === 'have') list = list.filter(c => COL[c.id]);
@@ -730,7 +752,7 @@ function cleanRec(r) {
   if (!r || typeof r !== 'object' || typeof r.d !== 'number' || typeof r.n !== 'string') return null;
   return {
     d: r.d, n: str(r.n, 80), s: str(r.s, 80), y: str(r.y, 4), no: str(r.no, 20), r: str(r.r, 60), th: httpUrl(r.th),
-    p: typeof r.p === 'number' ? r.p : null, t: +r.t || Date.now(), cu: r.cu ? 1 : 0
+    p: typeof r.p === 'number' ? r.p : null, t: +r.t || Date.now(), cu: r.cu ? 1 : 0, sid: str(r.sid, 40)
   };
 }
 function cleanBinder(b) {
@@ -817,14 +839,28 @@ function customCard(id) {
 }
 const customsFor = d => Object.keys(CUS).filter(id => CUS[id].d === d).map(customCard);
 
+const recHref = (id, r) => (r.d ? `#/p/${r.d}/${encodeURIComponent(id)}` : (r.sid ? `#/set/${encodeURIComponent(r.sid)}/${encodeURIComponent(id)}` : '#/sets'));
+
 function recFor(c, dex) {
   return {
     d: dex, n: c.name, s: setName(c), y: yearOf(c), no: numLabel(c), r: rarityOf(c) || '',
-    th: c.custom ? '' : (c.thumb || ''), p: primaryPrice(c), t: Date.now(), cu: c.custom ? 1 : 0
+    th: c.custom ? '' : (c.thumb || ''), p: primaryPrice(c), t: Date.now(), cu: c.custom ? 1 : 0,
+    sid: c.custom || c.src === 'ptcg' ? '' : (c.setId || '')
   };
 }
 
+const dexNow = (v, c) => (v.set ? dexOfCard(c) : v.id);
+
+/* on a set page the Pokédex number comes with the card's details, so fetch them first if they are not here yet */
+function deferForDetail(v, c, fn) {
+  const d = S.details[c.id];
+  if (!v.set || c.pre || (d && d.length >= 7)) return false;
+  fetchDetail(c.id).then(() => { persistDetails(); if (V === v) fn(v, c); }).catch(() => toast('Could not read that card’s details. Try again.'));
+  return true;
+}
+
 function toggleCol(v, c) {
+  if (!COL[c.id] && deferForDetail(v, c, toggleCol)) return;
   if (COL[c.id]) {
     const names = BND.list.filter(b => inB(b, c.id)).map(b => '“' + b.name + '”');
     delete COL[c.id];
@@ -832,7 +868,7 @@ function toggleCol(v, c) {
     saveBnd();
     if (names.length) toast('Removed from your collection and from ' + names.join(', ') + '.');
   } else {
-    COL[c.id] = recFor(c, v.id);
+    COL[c.id] = recFor(c, dexNow(v, c));
     if (TGT[c.id]) { delete TGT[c.id]; saveTgt(); }
     askPersist();
   }
@@ -841,10 +877,11 @@ function toggleCol(v, c) {
 }
 
 function toggleBnd(v, c) {
+  if (!COL[c.id] && !inB(activeB(), c.id) && deferForDetail(v, c, toggleBnd)) return;
   const b = activeB();
   if (inB(b, c.id)) b.cards = b.cards.filter(x => x !== c.id);
   else {
-    if (!COL[c.id]) { COL[c.id] = recFor(c, v.id); saveCol(); }
+    if (!COL[c.id]) { COL[c.id] = recFor(c, dexNow(v, c)); saveCol(); }
     if (TGT[c.id]) { delete TGT[c.id]; saveTgt(); }
     b.cards.push(c.id);
     askPersist();
@@ -855,7 +892,8 @@ function toggleBnd(v, c) {
 
 function toggleTgt(v, c) {
   if (COL[c.id]) return;
-  if (TGT[c.id]) delete TGT[c.id]; else TGT[c.id] = recFor(c, v.id);
+  if (!TGT[c.id] && deferForDetail(v, c, toggleTgt)) return;
+  if (TGT[c.id]) delete TGT[c.id]; else TGT[c.id] = recFor(c, dexNow(v, c));
   saveTgt();
   afterChange(v, c);
 }
@@ -865,8 +903,8 @@ function afterChange(v, c) {
   const el = v.pockets && v.pockets.get(c.id);
   if (el) syncPocket(el, c);
   syncLb(c);
-  const sp = S.byId.get(v.id);
-  if (sp) sp.tile.classList.toggle('has', S.ownByDex.has(v.id));
+  const dx = dexNow(v, c), sp = S.byId.get(dx);
+  if (sp) sp.tile.classList.toggle('has', S.ownByDex.has(dx));
   updateBinderBadge();
   updateMeta(v);
 }
@@ -1245,10 +1283,172 @@ function showHome() {
 function setMode(m) {
   $('#home').hidden = m !== 'home';
   $('#poke').hidden = m !== 'poke';
+  $('#sets').hidden = m !== 'sets';
   $('#binder').hidden = m !== 'binder';
   $('#searchWrap').hidden = m !== 'home';
   $('#genChips').hidden = m !== 'home';
   if (m === 'binder') $('#binderLink').setAttribute('aria-current', 'page'); else $('#binderLink').removeAttribute('aria-current');
+  if (m === 'sets') $('#setsLink').setAttribute('aria-current', 'page'); else $('#setsLink').removeAttribute('aria-current');
+}
+
+/* ---------- sets ---------- */
+const viewBase = v => (v.set ? '#/set/' + encodeURIComponent(v.set) : '#/p/' + v.id);
+let setsTok = 0;
+
+async function loadSeriesMap() {
+  const c = LS.get('ser', null);
+  if (c && Date.now() - c.t < 14 * DAY && c.list.length) return c.list;
+  const list = await getJSON(API + '/series');
+  if (!Array.isArray(list)) throw new Error('Unexpected response');
+  const out = [];
+  await pool(list.filter(x => x && x.id && x.id !== 'tcgp'), 6, async x => {
+    const sr = await getJSON(`${API}/series/${encodeURIComponent(x.id)}`, { tries: 2 });
+    out.push({ i: list.indexOf(x), id: x.id, name: sr.name || x.name || x.id, sets: ((sr && sr.sets) || []).map(y => y.id).filter(Boolean) });
+  }, () => true);
+  out.sort((a, b) => a.i - b.i);
+  if (out.length) LS.set('ser', { t: Date.now(), list: out });
+  return out;
+}
+
+function setTile(st) {
+  return h('a', { class: 'settile', href: '#/set/' + encodeURIComponent(st.id), dataset: { name: norm(st.name + ' ' + st.id) } },
+    h('span', { class: 'sl' }, st.logo ? h('img', { src: st.logo + '.webp', alt: '', loading: 'lazy', decoding: 'async', onerror: e => { e.target.hidden = true; } }) : null),
+    h('span', { class: 'sn' }, st.name),
+    h('span', { class: 'sc' }, st.total ? st.total + ' cards' : ''));
+}
+
+async function showSets() {
+  setMode('sets');
+  V = null;
+  closeLightboxUI();
+  document.title = 'Sets · Pokédex Printings';
+  const tok = ++setsTok, root = $('#sets'), head = h('div', { class: 'bhead' }, h('h1', null, 'Sets'));
+  root.replaceChildren(head, h('p', { class: 'state' }, 'Loading sets…'));
+  let pocket;
+  try { pocket = await S.pocketReady; } catch { pocket = new Set(); }
+  if (tok !== setsTok) return;
+  const sets = S.sets.filter(x => !pocket.has(x.id) && !POCKET_RE.test(x.id));
+  if (!sets.length) { root.replaceChildren(head, h('p', { class: 'state' }, 'The set list is not available right now. Try again in a minute.')); return; }
+
+  const body = h('div'), none = h('p', { class: 'state', hidden: true }, 'No sets match that.');
+  const apply = () => {
+    const nq = norm(q.value);
+    let shown = 0;
+    for (const g of body.querySelectorAll('.setgroup')) {
+      let n = 0;
+      for (const t of g.querySelectorAll('.settile')) { const ok = !nq || t.dataset.name.includes(nq); t.hidden = !ok; if (ok) n++; }
+      g.hidden = !n; shown += n;
+    }
+    none.hidden = shown > 0;
+  };
+  const q = h('input', { type: 'search', id: 'setq', class: 'colq', placeholder: 'Search sets, like “Evolving Skies” or “151”', 'aria-label': 'Search sets', oninput: apply });
+  const build = series => {
+    const byId = new Map(sets.map(x => [x.id, x])), used = new Set(), groups = [];
+    if (series) {
+      for (const sr of series.slice().reverse()) {
+        const list = sr.sets.map(id => byId.get(id)).filter(Boolean);
+        list.forEach(x => used.add(x.id));
+        if (list.length) groups.push({ name: sr.name, list: list.reverse() });
+      }
+    }
+    const rest = sets.filter(x => !used.has(x.id)).reverse();
+    if (rest.length) groups.push({ name: series ? 'Other' : '', list: rest });
+    body.replaceChildren(...groups.map(g => h('section', { class: 'setgroup' }, g.name ? h('h2', null, g.name) : null, h('div', { class: 'setgrid' }, g.list.map(setTile)))));
+    apply();
+  };
+  root.replaceChildren(head, h('div', { class: 'toolbar' }, q), body, none);
+  build(null);
+  loadSeriesMap().then(series => { if (tok === setsTok && series.length) build(series); }).catch(() => {});
+}
+
+async function loadSetCards(id) {
+  if (S.setCards.has(id)) return S.setCards.get(id);
+  const st = await getJSON(`${API}/sets/${encodeURIComponent(id)}`);
+  if (!st || !Array.isArray(st.cards)) throw new Error('Unexpected response from the card database');
+  S.setMeta[id] = [st.releaseDate || '', (st.serie && st.serie.name) || '', (st.serie && st.serie.id) || ''];
+  LS.set('sm', S.setMeta);
+  const res = { cards: st.cards.filter(c => c && c.id).map(c => ({ ...normCard(c), setId: id })), pocket: !!(st.serie && st.serie.id === 'tcgp'), name: st.name || id, logo: st.logo || null };
+  S.setCards.set(id, res);
+  return res;
+}
+
+function showSet(id, cardId) {
+  setMode('poke');
+  if (V && V.set === id) {
+    if (cardId && !V.cardId) V.lbBack = true;
+    syncLightbox(cardId);
+    return;
+  }
+  closeLightboxUI();
+  const st = S.setsById.get(id);
+  const v = V = {
+    set: id, id: 0, sp: null, token: ++S.token, cards: null, visible: [], how: 'tcgdex', hidden: 0,
+    sort: 'num', rarity: null, own: 'all', all: false, cardId: cardId || null, lbBack: false,
+    caps: new Map(), pockets: new Map(), el: {}
+  };
+  document.title = (st ? st.name : id) + ' · Pokédex Printings';
+  renderSetShell(v, st);
+  populateSet(v);
+}
+
+function renderSetShell(v, st) {
+  v.el.meta = h('p', { class: 'hero-meta' }, 'Loading cards…');
+  v.el.status = h('p', { class: 'status', role: 'status', 'aria-live': 'polite' });
+  v.el.chips = h('div', { class: 'chips wrap', role: 'group', 'aria-label': 'Filter by rarity' });
+  v.el.grid = h('div', { class: 'gallery' });
+  v.el.empty = h('p', { class: 'state', hidden: true }, 'No cards match that filter.');
+
+  const sort = h('select', { id: 'sortSel', onchange: e => { v.sort = e.target.value; renderGallery(v); } },
+    h('option', { value: 'num' }, 'Card number'), h('option', { value: 'dex' }, 'Pokédex order'), h('option', { value: 'price' }, 'Highest price'));
+  const ownSel = h('select', { id: 'ownSel', onchange: e => { v.own = e.target.value; renderGallery(v); } },
+    h('option', { value: 'all' }, 'All cards'), h('option', { value: 'have' }, 'In my collection'), h('option', { value: 'missing' }, 'Not in my collection'),
+    h('option', { value: 'binder' }, 'In the selected binder'), h('option', { value: 'target' }, 'On my target list'));
+  const cw = LS.get('cw', 150);
+  document.documentElement.style.setProperty('--cw', cw + 'px');
+  const size = h('input', {
+    id: 'sizeRange', type: 'range', min: 100, max: 280, step: 10, value: cw,
+    oninput: e => { document.documentElement.style.setProperty('--cw', e.target.value + 'px'); LS.set('cw', +e.target.value); }
+  });
+  const kinds = h('label', { class: 'chk' },
+    h('input', { type: 'checkbox', id: 'allKinds', onchange: e => { v.all = e.target.checked; renderGallery(v); } }), 'Include Trainers and Energy');
+  const logo = st && st.logo ? st.logo + '.webp' : null;
+
+  $('#poke').replaceChildren(
+    h('nav', { class: 'crumbs', 'aria-label': 'Set navigation' }, h('a', { class: 'back', href: '#/sets' }, '← All sets')),
+    h('div', { class: 'hero' },
+      logo ? h('img', { class: 'hero-logo', src: logo, alt: '', onerror: e => { e.target.style.visibility = 'hidden'; } }) : null,
+      h('div', null, h('p', { class: 'dexno' }, 'Set'), h('h1', null, st ? st.name : v.set), v.el.meta)),
+    h('div', { class: 'controls' },
+      h('div', { class: 'row' },
+        h('label', { class: 'field', for: 'sortSel' }, 'Order', sort),
+        h('label', { class: 'field', for: 'ownSel' }, 'Show', ownSel),
+        h('label', { class: 'field', for: 'sizeRange' }, 'Card size', size)),
+      h('div', { class: 'row' }, h('label', { class: 'field' }, 'Binder buttons add to', binderSelect()), kinds),
+      v.el.chips),
+    v.el.status, v.el.grid, v.el.empty);
+  scrollTo(0, 0);
+}
+
+async function populateSet(v) {
+  const alive = () => V === v;
+  try {
+    const pocket = await S.pocketReady;
+    if (pocket.has(v.set) || POCKET_RE.test(v.set)) { v.el.meta.textContent = 'That is a TCG Pocket set (digital cards), which this app leaves out.'; return; }
+    const res = await loadSetCards(v.set);
+    if (!alive()) return;
+    if (res.pocket) { v.el.meta.textContent = 'That is a TCG Pocket set (digital cards), which this app leaves out.'; return; }
+    v.cards = res.cards.map(c => ({ ...c, inSet: true }));
+    if (!v.cards.length) { v.el.meta.textContent = 'No cards found in this set.'; return; }
+    renderGallery(v); updateMeta(v);
+    if (v.cardId) openLightbox(v.cardId);
+    enrich(v);
+  } catch (e) {
+    if (!alive()) return;
+    v.el.meta.textContent = 'Could not load this set.';
+    v.el.grid.replaceChildren(h('div', { class: 'state', style: 'grid-column:1/-1' },
+      'The card database did not respond (' + (e && e.message || 'network error') + '). ',
+      h('button', { type: 'button', class: 'btn', onclick: () => { v.el.meta.textContent = 'Loading cards…'; v.el.grid.replaceChildren(); populateSet(v); } }, 'Try again')));
+  }
 }
 
 /* ---------- Pokémon page ---------- */
@@ -1290,6 +1490,7 @@ function renderShell(v) {
     h('option', { value: 'new' }, 'Newest first'), h('option', { value: 'old' }, 'Oldest first'), h('option', { value: 'price' }, 'Highest price'));
   sort.value = v.sort;
 
+  v.el.setSel = h('select', { id: 'setSel', onchange: e => { v.setF = e.target.value || null; renderGallery(v); } }, h('option', { value: '' }, 'All sets'));
   const ownSel = h('select', { id: 'ownSel', onchange: e => { v.own = e.target.value; renderGallery(v); } },
     h('option', { value: 'all' }, 'All printings'), h('option', { value: 'have' }, 'In my collection'), h('option', { value: 'missing' }, 'Not in my collection'), h('option', { value: 'binder' }, 'In the selected binder'), h('option', { value: 'target' }, 'On my target list'));
 
@@ -1313,6 +1514,7 @@ function renderShell(v) {
       h('div', { class: 'row' },
         h('label', { class: 'field', for: 'sortSel' }, 'Order', sort),
         h('label', { class: 'field', for: 'ownSel' }, 'Show', ownSel),
+        h('label', { class: 'field', for: 'setSel' }, 'Set', v.el.setSel),
         h('label', { class: 'field', for: 'sizeRange' }, 'Card size', size)),
       h('div', { class: 'row' },
         h('label', { class: 'field' }, 'Binder buttons add to', binderSelect()),
@@ -1362,7 +1564,7 @@ async function enrich(v) {
     /* belt and braces: drop any set the series data says is TCG Pocket */
     const before = v.cards.length;
     v.cards = v.cards.filter(c => (S.setMeta[c.setId] || [])[2] !== 'tcgp');
-    if (v.cards.length !== before) { v.hidden += before - v.cards.length; S.cards.get(v.id).cards = v.cards.filter(c => !c.custom); }
+    if (v.cards.length !== before) { v.hidden += before - v.cards.length; const cached = S.cards.get(v.id); if (cached) cached.cards = v.cards.filter(c => !c.custom); }
     renderGallery(v); updateMeta(v);
   }
 
@@ -1383,13 +1585,27 @@ async function enrich(v) {
   if (!alive()) return;
   status(v, '');
   buildChips(v); updateMeta(v);
-  if (v.rarity || v.sort === 'price') renderGallery(v);
+  if (v.rarity || v.sort === 'price' || v.sort === 'dex' || v.set) renderGallery(v);
 }
 
 function status(v, t) { if (V === v) v.el.status.textContent = t; }
 
 function updateMeta(v) {
   if (!v.cards) return;
+  if (v.set) {
+    const m = S.setMeta[v.set] || [], n = v.cards.length;
+    const parts = [`${n} card${n === 1 ? '' : 's'}`];
+    if (m[0]) parts.push(m[0].slice(0, 4));
+    if (m[1]) parts.push(m[1]);
+    const art = v.cards.filter(c => isArtRare(rarityOf(c))).length;
+    if (art) parts.push(`${art} art rare${art === 1 ? '' : 's'}`);
+    const have = v.cards.filter(c => COL[c.id]).length;
+    if (have) parts.push(`${have} in your collection`);
+    const tg = v.cards.filter(c => TGT[c.id]).length;
+    if (tg) parts.push(`${tg} on your target list`);
+    v.el.meta.textContent = parts.join(' · ');
+    return;
+  }
   const n = v.cards.length;
   const sets = new Set(v.cards.map(c => c.setId)).size;
   const dates = v.cards.map(dateOf).filter(Boolean).sort();
@@ -1411,7 +1627,22 @@ function updateMeta(v) {
     + (v.hidden ? ` · ${v.hidden} Pocket card${v.hidden === 1 ? '' : 's'} hidden` : '');
 }
 
+function buildSetSel(v) {
+  const sel = v.el.setSel;
+  if (!sel || v.set || !v.cards) return;
+  const by = new Map();
+  for (const c of v.cards) {
+    if (c.custom) continue;
+    const e = by.get(c.setId) || { name: setName(c), n: 0, date: dateOf(c) };
+    e.n++; by.set(c.setId, e);
+  }
+  sel.replaceChildren(h('option', { value: '' }, 'All sets'),
+    ...[...by.entries()].sort((a, b) => (b[1].date || '').localeCompare(a[1].date || '')).map(([id, e]) => h('option', { value: id }, `${e.name} (${e.n})`)));
+  sel.value = v.setF && by.has(v.setF) ? v.setF : '';
+}
+
 function buildChips(v) {
+  buildSetSel(v);
   const counts = new Map();
   let art = 0;
   for (const c of v.cards) {
@@ -1451,9 +1682,9 @@ function pocket(v, c) {
     : h('div', { class: 'noimg' }, h('span', null, c.name), h('small', null, 'No image'));
   const cap = h('span', { class: 'cap' });
   const yr = yearOf(c);
-  const link = h('a', { class: 'pk-link', href: `#/p/${v.id}/${encodeURIComponent(c.id)}` },
+  const link = h('a', { class: 'pk-link', href: `${viewBase(v)}/${encodeURIComponent(c.id)}` },
     h('span', { class: 'art' }, art),
-    h('span', { class: 'set', title: setName(c) }, setName(c) + (yr ? ' · ' + yr : '')));
+    h('span', { class: 'set', title: c.inSet ? c.name : setName(c) }, c.inSet ? c.name : setName(c) + (yr ? ' · ' + yr : '')));
   const own = h('button', { type: 'button', class: 'own', onclick: () => toggleCol(v, c) });
   const bnd = h('button', { type: 'button', class: 'bnd', onclick: () => toggleBnd(v, c) }, bookIcon());
   const tgt = h('button', { type: 'button', class: 'tgt', onclick: () => toggleTgt(v, c) });
@@ -1468,6 +1699,7 @@ function pocket(v, c) {
 function fillCap(cap, c) {
   const r = rarityOf(c), pr = primaryPrice(c);
   cap.replaceChildren(
+    c.inSet ? h('span', { class: 'nm' }, c.name) : null,
     h('span', null, numLabel(c)),
     c.lang ? h('span', { class: 'lang' }, c.lang) : null,
     r ? h('span', { class: isArtRare(r) ? 'art-r' : '' }, (glyph(r) ? glyph(r) + ' ' : '') + r) : null,
@@ -1508,7 +1740,8 @@ function openLightbox(cardId) {
     const r = rarityOf(c), ill = illustratorOf(c), series = seriesOf(c), logo = logoOf(c);
     const pl = pricesOf(c), upd = priceUpdated(c);
 
-    const rows = [['Set', setName(c) + (yearOf(c) ? ' · ' + yearOf(c) : '')], ['Number', numLabel(c)]];
+    const setLabel = setName(c) + (yearOf(c) ? ' · ' + yearOf(c) : '');
+    const rows = [['Set', c.custom || v.set || !S.setsById.has(c.setId) ? setLabel : h('a', { href: '#/set/' + encodeURIComponent(c.setId), title: 'See every card in this set' }, setLabel)], ['Number', numLabel(c)]];
     if (series) rows.splice(1, 0, ['Series', series]);
     if (c.lang) rows.push(['Language', c.lang]);
     rows.push(
@@ -1572,13 +1805,13 @@ function lbStep(d) {
   const i = list.findIndex(x => x.id === V.cardId);
   if (i < 0 || list.length < 2) return;
   const nx = list[(i + d + list.length) % list.length];
-  location.replace(`#/p/${V.id}/${encodeURIComponent(nx.id)}`);
+  location.replace(`${viewBase(V)}/${encodeURIComponent(nx.id)}`);
 }
 
 function lbClose() {
   if (!V) return;
   if (V.lbBack) { V.lbBack = false; history.back(); }
-  else location.replace('#/p/' + V.id);
+  else location.replace(viewBase(V));
 }
 
 function closeLightboxUI() {
@@ -1664,7 +1897,7 @@ function binderItems(b) {
 function slotFor(it) {
   if (it.rec) {
     const r = it.rec, img = r.cu ? customImg(it.id) : r.th;
-    return h('a', { class: 'slot filled', href: `#/p/${r.d}/${encodeURIComponent(it.id)}`, title: `${r.n} · ${r.s} ${r.no}` },
+    return h('a', { class: 'slot filled', href: recHref(it.id, r), title: `${r.n} · ${r.s} ${r.no}` },
       img ? h('img', { src: img, alt: `${r.n}, ${r.s} ${r.no}`, loading: 'lazy', decoding: 'async' }) : h('span', { class: 'slot-txt' }, r.n),
       h('span', { class: 'sl-no' }, pad(r.d)));
   }
@@ -1806,7 +2039,7 @@ function colTile(r) {
   const img = r.cu ? customImg(r.id) : r.th;
   const inN = BND.list.filter(b => inB(b, r.id)).length;
   return h('div', { class: 'pocket owned' },
-    h('a', { class: 'pk-link', href: `#/p/${r.d}/${encodeURIComponent(r.id)}` },
+    h('a', { class: 'pk-link', href: recHref(r.id, r) },
       h('span', { class: 'art' }, img
         ? h('img', { src: img, alt: `${r.n}, ${r.s} ${r.no}`, width: 245, height: 337, loading: 'lazy', decoding: 'async' })
         : h('div', { class: 'noimg' }, h('span', null, r.n), h('small', null, 'No image'))),
@@ -1876,7 +2109,7 @@ function targetsView() {
 function tgtTile(r) {
   const img = r.cu ? customImg(r.id) : r.th;
   return h('div', { class: 'pocket' },
-    h('a', { class: 'pk-link', href: `#/p/${r.d}/${encodeURIComponent(r.id)}` },
+    h('a', { class: 'pk-link', href: recHref(r.id, r) },
       h('span', { class: 'art' }, img
         ? h('img', { src: img, alt: `${r.n}, ${r.s} ${r.no}`, width: 245, height: 337, loading: 'lazy', decoding: 'async' })
         : h('div', { class: 'noimg' }, h('span', null, r.n), h('small', null, 'No image'))),
@@ -1910,6 +2143,19 @@ function route() {
     if (mode === 'binder') binderY = window.scrollY;
     showPoke(+m[1], m[2] ? decodeURIComponent(m[2]) : null);
     mode = 'poke';
+  } else if ((m = /^#\/set\/([^/]+)(?:\/(.+))?$/.exec(hash))) {
+    if (mode === 'home') homeY = window.scrollY;
+    if (mode === 'binder') binderY = window.scrollY;
+    if (mode === 'sets') setsY = window.scrollY;
+    showSet(decodeURIComponent(m[1]), m[2] ? decodeURIComponent(m[2]) : null);
+    mode = 'poke';
+  } else if (hash === '#/sets') {
+    const from = mode;
+    if (mode === 'home') homeY = window.scrollY;
+    if (mode === 'binder') binderY = window.scrollY;
+    showSets();
+    mode = 'sets';
+    if (from === 'poke') requestAnimationFrame(() => scrollTo(0, setsY)); else scrollTo(0, 0);
   } else if ((m = /^#\/binder(?:\/(.+))?$/.exec(hash))) {
     const from = mode;
     if (mode === 'home') homeY = window.scrollY;
