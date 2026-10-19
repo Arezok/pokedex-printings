@@ -514,9 +514,17 @@ const isPocketCard = (c, pocket) => {
 
 /* Some sets (Trainer Galleries, Galarian Galleries and others) have no pictures in TCGdex, so fall back to the Pokémon TCG API's images */
 const ptcgSetId = id => String(id).replace(/^([a-z]+)0(\d)/i, '$1$2').replace('.5', 'pt5');
+const numVariants = lid => { const a = String(lid); return [...new Set([a.replace(/^0+(?=\d)/, ''), a.replace(/^([A-Za-z]+)0+(?=\d)/, '$1')])]; };
 const ptcgImg = (setId, localId, big) => (setId && localId ? `https://images.pokemontcg.io/${encodeURIComponent(ptcgSetId(setId))}/${encodeURIComponent(String(localId).replace(/^0+(?=\d)/, ''))}${big ? '_hires' : ''}.png` : null);
 
 /* try each picture in turn; when none loads, show the card's name and number instead of a blank slot */
+let PIMG = LS.get('pimg', {});                      // cardId -> index of the picture source I picked
+const pickList = (c, key) => {
+  const l = c[key];
+  if (!l || !l.length) return null;
+  const k = (PIMG[c.id] || 0) % l.length;
+  return k ? l.slice(k).concat(l.slice(0, k)) : l;
+};
 function chainErr(urls, label, sub) {
   const list = [...new Set(urls.filter(Boolean))];
   let i = 0;
@@ -537,7 +545,9 @@ function normCard(c) {
   return {
     id: c.id, localId: lid, name: c.name || '', setId: sid, src: 'tcgdex',
     thumb: b ? b + '/low.webp' : ptcgImg(sid, lid, false), thumbAlt: b ? b + '/low.png' : null, thumbAlt2: b ? ptcgImg(sid, lid, false) : null,
-    full: b ? b + '/high.webp' : ptcgImg(sid, lid, true), fullAlt: b ? b + '/high.png' : null, fullAlt2: b ? ptcgImg(sid, lid, true) : null
+    full: b ? b + '/high.webp' : ptcgImg(sid, lid, true), fullAlt: b ? b + '/high.png' : null, fullAlt2: b ? ptcgImg(sid, lid, true) : null,
+    thumbs: [...new Set([b && b + '/low.webp', b && b + '/low.png', ...numVariants(lid).map(n => ptcgImg(sid, n, false))].filter(Boolean))],
+    fulls: [...new Set([b && b + '/high.webp', b && b + '/high.png', ...numVariants(lid).map(n => ptcgImg(sid, n, true))].filter(Boolean))]
   };
 }
 
@@ -1742,10 +1752,8 @@ function renderGallery(v) {
 function pocket(v, c) {
   const alt = `${c.name}, ${setName(c)} ${c.localId}`;
   const art = c.thumb
-    ? h('img', {
-        src: c.thumb, alt, width: 245, height: 337, loading: 'lazy', decoding: 'async',
-        onerror: chainErr([c.thumb, c.thumbAlt, c.thumbAlt2], c.name, numLabel(c))
-      })
+    ? (() => { const l = pickList(c, 'thumbs') || [c.thumb, c.thumbAlt, c.thumbAlt2];
+        return h('img', { src: l[0], alt, width: 245, height: 337, loading: 'lazy', decoding: 'async', onerror: chainErr(l, c.name, numLabel(c)) }); })()
     : h('div', { class: 'noimg' }, h('span', null, c.name), h('small', null, 'No image'));
   const cap = h('span', { class: 'cap' });
   const yr = yearOf(c);
@@ -1794,12 +1802,26 @@ function openLightbox(cardId) {
   document.documentElement.classList.add('lb-open');
   lb.scrollTop = 0;
 
-  $('#lbImg').replaceChildren(c.full
-    ? h('img', {
-        src: c.full, alt: `${c.name}, ${setName(c)} ${numLabel(c)}`,
-        onerror: chainErr([c.full, c.fullAlt, c.fullAlt2], c.name, numLabel(c))
-      })
+  const drawLbImg = () => $('#lbImg').replaceChildren(c.full
+    ? (() => { const l = pickList(c, 'fulls') || [c.full, c.fullAlt, c.fullAlt2];
+        return h('img', { src: l[0], alt: `${c.name}, ${setName(c)} ${numLabel(c)}`, onerror: chainErr(l, c.name, numLabel(c)) }); })()
     : h('div', { class: 'noimg' }, h('span', null, c.name), h('small', null, 'No image')));
+  drawLbImg();
+  const nPics = (c.fulls || []).length;
+  const otherPic = nPics > 1 ? h('button', {
+    type: 'button', id: 'lbPic', class: 'btn ghost',
+    onclick: () => {
+      PIMG[c.id] = ((PIMG[c.id] || 0) + 1) % nPics;
+      if (!PIMG[c.id]) delete PIMG[c.id];
+      LS.set('pimg', PIMG);
+      drawLbImg();
+      const l = pickList(c, 'thumbs'), pk = v.pockets.get(c.id);
+      if (pk && l) { const im = pk.querySelector('.art > img, .art > .noimg'); if (im) im.replaceWith(h('img', { src: l[0], alt: c.name, width: 245, height: 337, decoding: 'async', onerror: chainErr(l, c.name, numLabel(c)) })); }
+      for (const M of [COL, TGT]) if (M[c.id] && l) M[c.id].th = l[0];
+      saveCol(); saveTgt();
+      toast(`Picture ${(PIMG[c.id] || 0) + 1} of ${nPics}`);
+    }
+  }, 'Try other picture') : null;
 
   const info = $('#lbInfo');
   const draw = full => {
@@ -1831,6 +1853,7 @@ function openLightbox(cardId) {
       h('button', { type: 'button', id: 'lbTgt', class: 'btn ghost', onclick: () => toggleTgt(v, c) }),
       BND.list.length > 1 ? binderSelect() : null,
       c.custom ? null : h('a', { class: 'btn ghost', href: tcgUrl(c), target: '_blank', rel: 'noopener noreferrer' }, c.tcgUrl ? 'View on TCGplayer ↗' : 'Search TCGplayer ↗'),
+      otherPic,
       c.custom ? h('button', { type: 'button', id: 'lbEdit', class: 'btn ghost', onclick: () => openCardForm(v, c) }, 'Edit') : null,
       c.custom ? h('button', {
         type: 'button', id: 'lbDel', class: 'btn ghost',
