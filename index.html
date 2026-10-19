@@ -522,11 +522,14 @@ const ptcgImg = (setId, localId, big) => (setId && localId ? `https://images.pok
 
 /* try each picture in turn; when none loads, show the card's name and number instead of a blank slot */
 let PIMG = LS.get('pimg', {});                      // cardId -> index of the picture source I picked
+const prefLabel = () => 'Pictures: ' + (PREF === 'ptcg' ? 'Pokémon TCG API first' : 'TCGdex first');
+let PREF = LS.get('imgpref', 'ptcg');               // which source to try first: 'ptcg' (Pokémon TCG API) or 'tcgdex'; the other is the fallback
+const isPtcgUrl = u => /images\.pokemontcg\.io/.test(u || '');
 const pickList = (c, key) => {
   const l = c[key];
   if (!l || !l.length) return null;
-  const k = (PIMG[c.id] || 0) % l.length;
-  return k ? l.slice(k).concat(l.slice(0, k)) : l;
+  if (PIMG[c.id] != null) { const k = PIMG[c.id] % l.length; return k ? l.slice(k).concat(l.slice(0, k)) : l; }
+  return PREF === 'ptcg' ? [...l.filter(isPtcgUrl), ...l.filter(u => !isPtcgUrl(u))] : l;
 };
 function chainErr(urls, label, sub) {
   const list = [...new Set(urls.filter(Boolean))];
@@ -880,7 +883,7 @@ const recHref = (id, r) => (r.d ? `#/p/${r.d}/${encodeURIComponent(id)}` : (r.si
 function recFor(c, dex) {
   return {
     d: dex, n: c.name, s: setName(c), y: yearOf(c), no: numLabel(c), r: rarityOf(c) || '',
-    th: c.custom ? '' : (c.thumb || ''), p: primaryPrice(c), t: Date.now(), cu: c.custom ? 1 : 0,
+    th: c.custom ? '' : ((pickList(c, 'thumbs') || [c.thumb])[0] || ''), p: primaryPrice(c), t: Date.now(), cu: c.custom ? 1 : 0,
     sid: c.custom || c.src === 'ptcg' ? '' : (c.setId || '')
   };
 }
@@ -1824,8 +1827,8 @@ function openLightbox(cardId) {
   const otherPic = nPics > 1 ? h('button', {
     type: 'button', id: 'lbPic', class: 'btn ghost',
     onclick: () => {
-      PIMG[c.id] = ((PIMG[c.id] || 0) + 1) % nPics;
-      if (!PIMG[c.id]) delete PIMG[c.id];
+      const cur = pickList(c, 'fulls')[0];
+      PIMG[c.id] = (c.fulls.indexOf(cur) + 1) % nPics;
       LS.set('pimg', PIMG);
       drawLbImg();
       const l = pickList(c, 'thumbs'), pk = v.pockets.get(c.id);
@@ -1867,6 +1870,16 @@ function openLightbox(cardId) {
       BND.list.length > 1 ? binderSelect() : null,
       c.custom ? null : h('a', { class: 'btn ghost', href: tcgUrl(c), target: '_blank', rel: 'noopener noreferrer' }, c.tcgUrl ? 'View on TCGplayer ↗' : 'Search TCGplayer ↗'),
       otherPic,
+      nPics > 1 ? h('button', {
+        type: 'button', id: 'lbPref', class: 'btn ghost',
+        onclick: e => {
+          PREF = PREF === 'ptcg' ? 'tcgdex' : 'ptcg';
+          LS.set('imgpref', PREF);
+          e.currentTarget.textContent = prefLabel();
+          drawLbImg(); renderGallery(v);
+          toast(PREF === 'ptcg' ? 'Pokémon TCG API pictures first, TCGdex as backup.' : 'TCGdex pictures first, Pokémon TCG API as backup.');
+        }
+      }, prefLabel()) : null,
       c.custom ? h('button', { type: 'button', id: 'lbEdit', class: 'btn ghost', onclick: () => openCardForm(v, c) }, 'Edit') : null,
       c.custom ? h('button', {
         type: 'button', id: 'lbDel', class: 'btn ghost',
