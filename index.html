@@ -349,6 +349,9 @@ function h(tag, attrs, ...kids) {
   return el;
 }
 
+/* replaceChildren turns null into the text "null"; drop empty children the way h() does */
+{ const rc = Element.prototype.replaceChildren; Element.prototype.replaceChildren = function (...k) { return rc.apply(this, k.flat(Infinity).filter(x => x != null && x !== false)); }; }
+
 const LS = {
   get(k, d) { try { const v = localStorage.getItem('pdx1:' + k); return v ? JSON.parse(v) : d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem('pdx1:' + k, JSON.stringify(v)); return true; } catch { return false; } },
