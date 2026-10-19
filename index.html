@@ -510,13 +510,32 @@ const isPocketCard = (c, pocket) => {
   return pocket.has(sid) || POCKET_RE.test(sid) || /\/tcgp\//.test(c.image || '');
 };
 
+/* Some sets (Trainer Galleries, Galarian Galleries and others) have no pictures in TCGdex, so fall back to the Pokémon TCG API's images */
+const ptcgSetId = id => String(id).replace(/^([a-z]+)0(\d)/i, '$1$2').replace('.5', 'pt5');
+const ptcgImg = (setId, localId, big) => (setId && localId ? `https://images.pokemontcg.io/${encodeURIComponent(ptcgSetId(setId))}/${encodeURIComponent(localId)}${big ? '_hires' : ''}.png` : null);
+
+/* try each picture in turn; when none loads, show the card's name and number instead of a blank slot */
+function chainErr(urls, label, sub) {
+  const list = [...new Set(urls.filter(Boolean))];
+  let i = 0;
+  return e => {
+    const img = e.target;
+    if (++i < list.length) { img.src = list[i]; return; }
+    img.replaceWith(h('div', { class: 'noimg' }, h('span', null, label), sub ? h('small', null, sub) : null));
+  };
+}
+const recUrls = r => {
+  const th = r.th || '';
+  return [th, th.replace(/\.webp$/, '.png'), ptcgImg(r.sid, String(r.no || '').split('/')[0].replace(/^#/, ''), false)];
+};
+
 function normCard(c) {
   const lid = String(c.localId ?? '');
-  const b = c.image || null;
+  const b = c.image || null, sid = setIdOf(c);
   return {
-    id: c.id, localId: lid, name: c.name || '', setId: setIdOf(c), src: 'tcgdex',
-    thumb: b ? b + '/low.webp' : null, thumbAlt: b ? b + '/low.png' : null,
-    full: b ? b + '/high.webp' : null, fullAlt: b ? b + '/high.png' : null
+    id: c.id, localId: lid, name: c.name || '', setId: sid, src: 'tcgdex',
+    thumb: b ? b + '/low.webp' : ptcgImg(sid, lid, false), thumbAlt: b ? b + '/low.png' : null, thumbAlt2: b ? ptcgImg(sid, lid, false) : null,
+    full: b ? b + '/high.webp' : ptcgImg(sid, lid, true), fullAlt: b ? b + '/high.png' : null, fullAlt2: b ? ptcgImg(sid, lid, true) : null
   };
 }
 
@@ -1677,7 +1696,7 @@ function pocket(v, c) {
   const art = c.thumb
     ? h('img', {
         src: c.thumb, alt, width: 245, height: 337, loading: 'lazy', decoding: 'async',
-        onerror: e => { const i = e.target; if (c.thumbAlt && !i.dataset.p) { i.dataset.p = '1'; i.src = c.thumbAlt; } }
+        onerror: chainErr([c.thumb, c.thumbAlt, c.thumbAlt2], c.name, numLabel(c))
       })
     : h('div', { class: 'noimg' }, h('span', null, c.name), h('small', null, 'No image'));
   const cap = h('span', { class: 'cap' });
@@ -1729,7 +1748,7 @@ function openLightbox(cardId) {
   $('#lbImg').replaceChildren(c.full
     ? h('img', {
         src: c.full, alt: `${c.name}, ${setName(c)} ${numLabel(c)}`,
-        onerror: e => { const i = e.target; if (c.fullAlt && !i.dataset.p) { i.dataset.p = '1'; i.src = c.fullAlt; } }
+        onerror: chainErr([c.full, c.fullAlt, c.fullAlt2], c.name, numLabel(c))
       })
     : h('div', { class: 'noimg' }, h('span', null, c.name), h('small', null, 'No image')));
 
@@ -1898,7 +1917,7 @@ function slotFor(it) {
   if (it.rec) {
     const r = it.rec, img = r.cu ? customImg(it.id) : r.th;
     return h('a', { class: 'slot filled', href: recHref(it.id, r), title: `${r.n} · ${r.s} ${r.no}` },
-      img ? h('img', { src: img, alt: `${r.n}, ${r.s} ${r.no}`, loading: 'lazy', decoding: 'async' }) : h('span', { class: 'slot-txt' }, r.n),
+      img ? h('img', { src: img, alt: `${r.n}, ${r.s} ${r.no}`, loading: 'lazy', decoding: 'async', onerror: r.cu ? null : chainErr(recUrls(r), r.n, r.no) }) : h('span', { class: 'slot-txt' }, r.n),
       h('span', { class: 'sl-no' }, pad(r.d)));
   }
   const sp = it.sp;
@@ -2041,7 +2060,7 @@ function colTile(r) {
   return h('div', { class: 'pocket owned' },
     h('a', { class: 'pk-link', href: recHref(r.id, r) },
       h('span', { class: 'art' }, img
-        ? h('img', { src: img, alt: `${r.n}, ${r.s} ${r.no}`, width: 245, height: 337, loading: 'lazy', decoding: 'async' })
+        ? h('img', { src: img, alt: `${r.n}, ${r.s} ${r.no}`, width: 245, height: 337, loading: 'lazy', decoding: 'async', onerror: r.cu ? null : chainErr(recUrls(r), r.n, r.no) })
         : h('div', { class: 'noimg' }, h('span', null, r.n), h('small', null, 'No image'))),
       h('span', { class: 'set', title: r.s }, r.s + (r.y ? ' · ' + r.y : ''))),
     h('span', { class: 'cap' }, h('span', null, r.n), h('span', null, r.no),
@@ -2111,7 +2130,7 @@ function tgtTile(r) {
   return h('div', { class: 'pocket' },
     h('a', { class: 'pk-link', href: recHref(r.id, r) },
       h('span', { class: 'art' }, img
-        ? h('img', { src: img, alt: `${r.n}, ${r.s} ${r.no}`, width: 245, height: 337, loading: 'lazy', decoding: 'async' })
+        ? h('img', { src: img, alt: `${r.n}, ${r.s} ${r.no}`, width: 245, height: 337, loading: 'lazy', decoding: 'async', onerror: r.cu ? null : chainErr(recUrls(r), r.n, r.no) })
         : h('div', { class: 'noimg' }, h('span', null, r.n), h('small', null, 'No image'))),
       h('span', { class: 'set', title: r.s }, r.s + (r.y ? ' · ' + r.y : ''))),
     h('span', { class: 'cap' }, h('span', null, r.n), h('span', null, r.no),
