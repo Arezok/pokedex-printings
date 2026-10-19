@@ -1485,7 +1485,7 @@ async function populateSet(v) {
 }
 
 /* ---------- Pokémon page ---------- */
-const normNo = x => String(x).toLowerCase().replace(/^0+(?=\d)/, '');
+const normNo = x => String(x).toLowerCase().replace(/^([a-z]*)0+(?=\d)/, '$1');   // 02, H02 and H2 are the same number
 
 /* The card database searches by name, which can miss regional forms ("Hisuian Voltorb") and other prefixed names.
    The Pokémon TCG API lists cards by Pokédex number, so add whatever it has that we do not already show. */
@@ -1500,7 +1500,17 @@ async function supplementPtcg(v) {
   if (V !== v || !v.cards) return;
   const have = new Set(v.cards.filter(c => !c.pre).map(c => ptcgSetId(c.setId) + '|' + normNo(c.localId)));
   const ids = new Set(v.cards.map(c => c.id));
-  const add = all.filter(c => !ids.has(c.id) && !have.has(c.setId.slice(2) + '|' + normNo(c.localId)));
+  const key = c => c.setId.slice(2) + '|' + normNo(c.localId);
+  const add = all.filter(c => !ids.has(c.id) && !have.has(key(c)));
+  /* a card both sources list keeps its one entry; the other source's exact picture is added as an extra choice */
+  const byKey = new Map(all.map(c => [key(c), c]));
+  for (const c of v.cards) {
+    if (c.pre || !c.thumbs) continue;
+    const m = byKey.get(ptcgSetId(c.setId) + '|' + normNo(c.localId));
+    if (!m) continue;
+    if (m.thumb && !c.thumbs.includes(m.thumb)) c.thumbs.push(m.thumb);
+    if (m.full && !c.fulls.includes(m.full)) c.fulls.push(m.full);
+  }
   if (add.length) {
     v.cards = v.cards.concat(add);
     v.extra = add.length;
