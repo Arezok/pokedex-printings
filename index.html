@@ -416,6 +416,8 @@ const S = {
   cards: new Map(),                   // pokemon id -> {cards, how, hidden}
   setCards: new Map(),                // set id -> {cards, ...}
   extras: new Map(),                  // pokemon id -> every card the Pokémon TCG API lists for that Pokédex number
+  foreign: new Map(),                 // 'ja:25' -> that Pokémon's cards in another language
+  tpByDex: new Map(),                 // pokemon id -> Japanese TCGplayer cards
   ownByDex: new Map(),                // dex id -> [owned records, newest first]
   token: 0
 };
@@ -665,7 +667,7 @@ const logoOf = c => {
 const rarityOf = c => (c.pre ? c.rarity : (S.details[c.id] ? S.details[c.id][0] : null));
 const illustratorOf = c => (c.pre ? c.artist : (S.details[c.id] ? S.details[c.id][1] : ''));
 const glyph = r => { const x = (r || '').toLowerCase(); if (!x || x === 'none') return ''; if (x === 'common') return '●'; if (x === 'uncommon') return '◆'; return '★'; };
-const isArtRare = r => /illustration|shiny|full art|alternate art|art rare/i.test(r || '');
+const isArtRare = r => /illustration|shiny|full art|alternate art|art rare|\b(?:AR|SAR|CHR|CSR)\b/i.test(r || '');
 function numLabel(c) {
   if (c.custom) return c.localId || '—';
   const t = c.set ? c.set.total : (S.setsById.get(c.setId) || {}).total;
@@ -708,6 +710,7 @@ function sortCards(v) {
 function visibleCards(v) {
   let list = sortCards(v);
   if (v.set && !v.all) list = list.filter(isPokeCard);
+  if (!v.set) list = list.filter(c => inLang(v, c));
   if (v.setF) list = list.filter(c => c.setId === v.setF);
   if (v.form) list = list.filter(c => formOf(c) === v.form);
   if (v.rarity === '__art') list = list.filter(c => isArtRare(rarityOf(c)));
@@ -884,7 +887,7 @@ function recFor(c, dex) {
   return {
     d: dex, n: c.name, s: setName(c), y: yearOf(c), no: numLabel(c), r: rarityOf(c) || '',
     th: c.custom ? '' : ((pickList(c, 'thumbs') || [c.thumb])[0] || ''), p: primaryPrice(c), t: Date.now(), cu: c.custom ? 1 : 0,
-    sid: c.custom || c.src === 'ptcg' ? '' : (c.setId || '')
+    sid: c.custom || c.pre ? '' : (c.setId || '')
   };
 }
 
@@ -1490,6 +1493,233 @@ async function populateSet(v) {
   }
 }
 
+/* ---------- other languages ---------- */
+/* TCGdex serves each language at its own path; card names are in that language, so we search with the
+   Pokémon's local name (from PokéAPI) and confirm with each card's Pokédex number once its details arrive. */
+const TCGDEX_ROOT = API.replace(/\/en$/, '');
+const LANGS = [
+  { name: 'Japanese', code: 'ja', poke: ['ja-hrkt', 'ja'] },
+  { name: 'Korean', code: 'ko', poke: ['ko'] },
+  { name: 'Chinese (Traditional)', code: 'zh-tw', poke: ['zh-hant'] },
+  { name: 'Chinese (Simplified)', code: 'zh-cn', poke: ['zh-hans'] }
+];
+const LANG_BY_CODE = new Map(LANGS.map(l => [l.code, l]));
+const langOf = c => c.lang || 'English';
+const langOfId = id => { const m = /^([a-z-]+):/.exec(id || ''); if (!m) return null; if (m[1] === 'tp') return 'Japanese'; const l = LANG_BY_CODE.get(m[1]); return l ? l.name : null; };
+const inLang = (v, c) => v.set || c.custom || v.lang === 'all' || langOf(c) === (v.lang || 'English');   // printings I added always show
+const poolOf = v => (v.cards || []).filter(c => inLang(v, c));
+
+let LNAMES = LS.get('ln', {});            // dex -> {ja, ko, zh-tw, zh-cn}: the Pokémon's name in each language
+let FX = LS.get('fx', {});                // 'ja:cardId' -> [rarity, illustrator, dexIds, category, prices, finishes, priceUpdated, fetchedAt]
+let FSM = LS.get('fsm', {});              // 'ja:setId' -> [releaseDate, seriesName]
+let fxOk = true;
+const saveFx = () => { clearTimeout(saveFx.t); saveFx.t = setTimeout(() => { if (fxOk && !LS.set('fx', FX)) fxOk = false; }, 800); };
+
+async function localName(sp, L) {
+  let e = LNAMES[sp.id];
+  if (!e) {
+    const s = await getJSON(`https://pokeapi.co/api/v2/pokemon-species/${sp.id}`, { tries: 2 });
+    e = {};
+    for (const l of LANGS) for (const k of l.poke) {
+      const n = (s.names || []).find(x => x && x.language && String(x.language.name).toLowerCase() === k);
+      if (n && n.name) { e[l.code] = n.name; break; }
+    }
+    LNAMES[sp.id] = e; LS.set('ln', LNAMES);
+  }
+  return e[L.code] || '';
+}
+
+const FSETS = new Map();                  // code -> Promise<Map(setId -> {name, logo, total})>
+function foreignSets(L) {
+  if (!FSETS.has(L.code)) FSETS.set(L.code, (async () => {
+    const key = 'fs:' + L.code, c = LS.get(key, null);
+    if (c && Date.now() - c.t < 7 * DAY && c.list.length) return new Map(c.list.map(x => [x.id, x]));
+    try {
+      const arr = await getJSON(`${TCGDEX_ROOT}/${L.code}/sets`, { tries: 2 });
+      const list = (Array.isArray(arr) ? arr : []).map(x => ({ id: x.id, name: x.name || x.id, logo: x.logo || null, total: x.cardCount ? (x.cardCount.official ?? x.cardCount.total ?? 0) : 0 }));
+      if (list.length) LS.set(key, { t: Date.now(), list });
+      return new Map(list.map(x => [x.id, x]));
+    } catch { return new Map(c ? c.list.map(x => [x.id, x]) : []); }
+  })());
+  return FSETS.get(L.code);
+}
+
+/* "ミュウ" is inside "ミュウツー": a match only counts when the next character does not continue the name */
+const KANA_HANGUL = /[゠-ヿ가-힯]/;
+function nameHas(name, loc) {
+  const n = String(name || '').replace(/\s+/g, ''), l = String(loc || '').replace(/\s+/g, '');
+  if (!l) return false;
+  for (let i = n.indexOf(l); i >= 0; i = n.indexOf(l, i + 1)) {
+    const after = n[i + l.length] || '', before = n[i - 1] || '';
+    if (KANA_HANGUL.test(after)) continue;
+    if (/[゠-ヿ]/.test(before) && /[゠-ヿ]/.test(l[0])) continue;
+    return true;
+  }
+  return false;
+}
+
+function applyFx(c) {
+  const e = FX[c.id];
+  if (e) { c.rarity = e[0]; c.artist = e[1]; c.dex = e[2]; if (!c.tp) { c.prices = e[4]; c.priceUpdated = e[6]; } c.finishes = e[5]; }
+  const m = FSM[c.setId];
+  if (m) { c.set.date = m[0]; c.set.series = m[1]; }
+}
+
+function foreignCard(L, c, sets) {
+  const sid = setIdOf(c), st = sets.get(sid) || {}, b = c.image || null;
+  const card = {
+    id: L.code + ':' + c.id, raw: c.id, code: L.code, localId: String(c.localId ?? ''), name: c.name || '', setId: L.code + ':' + sid,
+    rawSet: sid, src: 'tcgdex-' + L.code, pre: true, lang: L.name,
+    set: { name: st.name || sid, series: '', total: st.total || 0, date: '', logo: st.logo ? st.logo + '.webp' : null },
+    rarity: '', artist: '', finishes: [], prices: [], priceUpdated: '', tcgUrl: '',
+    thumb: b ? b + '/low.webp' : null, thumbAlt: b ? b + '/low.png' : null, full: b ? b + '/high.webp' : null, fullAlt: b ? b + '/high.png' : null,
+    thumbs: b ? [b + '/low.webp', b + '/low.png'] : [], fulls: b ? [b + '/high.webp', b + '/high.png'] : []
+  };
+  applyFx(card);
+  return card;
+}
+
+/* every card in language L whose name holds this Pokémon's local name (details and the Pokédex check come after) */
+async function loadForeign(sp, L) {
+  const key = L.code + ':' + sp.id;
+  if (S.foreign.has(key)) return S.foreign.get(key);
+  const loc = await localName(sp, L);
+  if (!loc) { S.foreign.set(key, []); return []; }
+  const pocket = await S.pocketReady, per = 100, seen = new Map();
+  for (let page = 1; page <= 15; page++) {
+    let arr;
+    try { arr = await getJSON(`${TCGDEX_ROOT}/${L.code}/cards?name=${encodeURIComponent(loc)}&pagination:page=${page}&pagination:itemsPerPage=${per}`); }
+    catch (e) { if (e.status === 404 || page > 1) break; throw e; }
+    if (!Array.isArray(arr)) throw new Error('Unexpected response from the card database');
+    if (page === 1 && arr.length >= 50 && arr.filter(c => String(c.name || '').includes(loc)).length < arr.length * 0.5) throw new Error('The card database ignored the name filter');
+    const before = seen.size;
+    for (const c of arr) if (c && c.id) seen.set(c.id, c);
+    if (arr.length < per || seen.size === before) break;
+  }
+  const sets = await foreignSets(L);
+  const list = [...seen.values()]
+    .filter(c => nameHas(c.name, loc) || ((FX[L.code + ':' + c.id] || [])[2] || []).includes(sp.id))
+    .filter(c => !isPocketCard(c, pocket))
+    .map(c => foreignCard(L, c, sets));
+  S.foreign.set(key, list);
+  return list;
+}
+
+/* release dates, then rarity, artist, prices and the Pokédex number; cards that turn out to be another Pokémon are dropped */
+async function enrichForeign(v, L) {
+  const alive = () => V === v;
+  const mine = () => v.cards.filter(c => c.code === L.code);
+  const needSets = [...new Set(mine().map(c => c.setId))].filter(id => !FSM[id]);
+  await pool(needSets, 6, async id => {
+    const s = await getJSON(`${TCGDEX_ROOT}/${L.code}/sets/${encodeURIComponent(id.slice(L.code.length + 1))}`, { tries: 2 });
+    FSM[id] = [s.releaseDate || '', (s.serie && s.serie.name) || ''];
+  }, alive);
+  if (needSets.length) LS.set('fsm', FSM);
+  if (!alive()) return;
+  for (const c of mine()) applyFx(c);
+  renderGallery(v);
+
+  const need = mine().filter(c => { const e = FX[c.id]; return !e || Date.now() - e[7] > 14 * DAY; });
+  let n = 0;
+  await pool(need, 6, async c => {
+    const d = await getJSON(`${TCGDEX_ROOT}/${L.code}/cards/${encodeURIComponent(c.raw)}`, { tries: 2 });
+    const pr = parsePricing(d);
+    const fin = d.variants ? Object.entries(d.variants).filter(([, on]) => on === true).map(([k]) => VAR_LABEL[k] || k) : [];
+    FX[c.id] = [d.rarity || '', d.illustrator || '', Array.isArray(d.dexId) ? d.dexId : [], d.category || '', pr ? pr.p : [], fin, pr ? pr.u : '', Date.now()];
+    applyFx(c);
+    if (++n % 10 === 0) status(v, `Reading ${L.name} card details · ${n} of ${need.length}`);
+    const cap = v.caps.get(c.id);
+    if (cap && alive()) fillCap(cap, c);
+  }, alive);
+  if (need.length) saveFx();
+  if (!alive()) return;
+  const before = v.cards.length;
+  v.cards = v.cards.filter(c => c.code !== L.code || !c.dex || !c.dex.length || c.dex.includes(v.id) || COL[c.id] || TGT[c.id]);
+  if (v.cards.length !== before) S.foreign.set(L.code + ':' + v.id, v.cards.filter(c => c.code === L.code));
+  status(v, '');
+}
+
+/* ---------- Japanese prices and pictures from TCGplayer (built nightly into data/tcgplayer-ja.json) ---------- */
+let TPJ = null;
+const tcgplayerJa = () => (TPJ = TPJ || getJSON(new URL('data/tcgplayer-ja.json', location.href).href, { tries: 2 }).catch(() => null));
+const TP_IMG = (pid, size) => `https://tcgplayer-cdn.tcgplayer.com/product/${pid}_${size}.jpg`;
+function tpCard(r, d) {
+  const [pid, gid, name, number, rarity, prices] = r, g = (d.groups || {})[gid] || [];
+  const [lid, tot] = String(number || '').split('/');
+  const pr = (prices || []).map(([k, m]) => [k, typeof m === 'number' ? m : null]);
+  return {
+    id: 'tp:' + pid, tp: pid, localId: (lid || '').trim(), name: name || '', setId: 'tp:' + gid, src: 'tcgplayer', pre: true, lang: 'Japanese',
+    set: { name: g[0] || 'TCGplayer (Japanese)', series: '', total: parseInt(tot, 10) || 0, date: String(g[1] || '').slice(0, 10), logo: null },
+    rarity: rarity || '', artist: '', finishes: pr.map(p => priceLabel(p[0])), prices: pr, priceUpdated: d.updated || '',
+    tcgUrl: 'https://www.tcgplayer.com/product/' + pid,
+    thumb: TP_IMG(pid, '200w'), thumbAlt: null, full: TP_IMG(pid, 'in_1000x1000'), fullAlt: TP_IMG(pid, '400w'),
+    thumbs: [TP_IMG(pid, '200w')], fulls: [TP_IMG(pid, 'in_1000x1000'), TP_IMG(pid, '400w')]
+  };
+}
+async function mergeTcgplayer(v) {
+  const d = await tcgplayerJa();
+  if (!d || !Array.isArray(d.cards) || V !== v || !v.cards) return 0;
+  let tps = S.tpByDex.get(v.id);
+  if (!tps) {
+    const needle = ' ' + norm(v.sp.name) + ' ';
+    tps = d.cards.filter(r => (' ' + norm(r[2] || '') + ' ').includes(needle)).map(r => tpCard(r, d));
+    S.tpByDex.set(v.id, tps);
+  }
+  const key = c => normNo(c.localId) + '/' + (c.set.total || 0);
+  const tpCount = new Map();
+  for (const t of tps) tpCount.set(key(t), (tpCount.get(key(t)) || 0) + 1);
+  const ja = v.cards.filter(c => c.code === 'ja');
+  const byKey = new Map();
+  for (const c of ja) { const k = key(c); byKey.set(k, byKey.has(k) ? null : c); }
+  const ids = new Set(v.cards.map(c => c.id)), add = [];
+  for (const t of tps) {
+    const k = key(t), c = t.set.total && tpCount.get(k) === 1 ? byKey.get(k) : null;
+    if (c) {                                   /* same card in both: one entry, TCGplayer price, link and picture added */
+      c.tp = t.tp; c.tcgUrl = t.tcgUrl; c.prices = t.prices; c.priceUpdated = t.priceUpdated;
+      if (!c.finishes.length) c.finishes = t.finishes;
+      if (!c.rarity) c.rarity = t.rarity;
+      for (const u of t.thumbs) if (!c.thumbs.includes(u)) c.thumbs.push(u);
+      for (const u of t.fulls) if (!c.fulls.includes(u)) c.fulls.push(u);
+      if (!c.thumb) { c.thumb = t.thumb; c.full = t.full; c.fullAlt = t.fullAlt; }
+      const cap = v.caps.get(c.id); if (cap) fillCap(cap, c);
+    } else if (!ids.has(t.id)) add.push(t);
+  }
+  if (add.length) v.cards = v.cards.concat(add);
+  return add.length;
+}
+
+/* load whatever the language picker needs that this page does not have yet */
+async function ensureLangs(v) {
+  if (v.set || !v.cards) return;
+  const want = v.lang === 'all' ? LANGS : LANGS.filter(l => l.name === v.lang);
+  v.loaded = v.loaded || new Set();
+  for (const L of want) {
+    if (v.loaded.has(L.code) || V !== v) continue;
+    v.loaded.add(L.code);
+    status(v, `Loading ${L.name} cards…`);
+    let got = [], err = null;
+    try { got = await loadForeign(v.sp, L); } catch (e) { err = e; }
+    if (V !== v) return;
+    const ids = new Set(v.cards.map(c => c.id));
+    v.cards = v.cards.concat(got.filter(c => !ids.has(c.id)));
+    let tpAdded = 0;
+    if (L.code === 'ja') { status(v, 'Loading Japanese prices from TCGplayer…'); tpAdded = await mergeTcgplayer(v); if (V !== v) return; }
+    renderGallery(v); buildChips(v); updateMeta(v);
+    openWanted(v);
+    if (err && !got.length && !tpAdded) { status(v, `${L.name} cards could not be loaded (${err.message || 'network error'}).`); v.loaded.delete(L.code); continue; }
+    if (!got.length && !tpAdded) { status(v, `No ${L.name} printings found for ${v.sp.name}.`); continue; }
+    await enrichForeign(v, L);
+    if (V !== v) return;
+    buildChips(v); updateMeta(v); renderGallery(v);
+    openWanted(v);
+  }
+}
+
+function openWanted(v) {
+  if (!v.wantCard || !langOfId(v.wantCard)) return;
+  if (v.cards.some(c => c.id === v.wantCard)) { const w = v.wantCard; v.wantCard = null; openLightbox(w); }
+}
+
 /* ---------- Pokémon page ---------- */
 const normNo = x => String(x).toLowerCase().replace(/^([a-z]*)0+(?=\d)/, '$1');   // 02, H02 and H2 are the same number
 
@@ -1522,7 +1752,7 @@ async function supplementPtcg(v) {
     v.extra = add.length;
     renderGallery(v); buildChips(v); updateMeta(v);
   }
-  if (v.wantCard) {
+  if (v.wantCard && v.wantCard.startsWith('p:')) {
     const w = v.wantCard; v.wantCard = null;
     if (v.cards.some(c => c.id === w)) openLightbox(w); else v.cardId = null;
   }
@@ -1545,6 +1775,7 @@ function showPoke(id, cardId) {
   const v = V = {
     id, sp, token: ++S.token, cards: null, visible: [], how: 'tcgdex', hidden: 0,
     sort: LS.get('sort', 'new'), rarity: null, own: 'all', cardId: cardId || null, lbBack: false,
+    lang: (cardId && langOfId(cardId)) || LS.get('lang', 'English'),
     caps: new Map(), pockets: new Map(), el: {}
   };
   document.title = sp.name + ' printings · Pokédex Printings';
@@ -1569,6 +1800,9 @@ function renderShell(v) {
   v.el.formSel = h('select', { id: 'formSel', onchange: e => { v.form = e.target.value || null; renderGallery(v); } }, h('option', { value: '' }, 'All forms'));
   v.el.formWrap = h('label', { class: 'field', for: 'formSel', hidden: true }, 'Form', v.el.formSel);
   v.el.setSel = h('select', { id: 'setSel', onchange: e => { v.setF = e.target.value || null; renderGallery(v); } }, h('option', { value: '' }, 'All sets'));
+  const langSel = h('select', { id: 'langSel', onchange: e => { v.lang = e.target.value; LS.set('lang', v.lang); v.setF = null; renderGallery(v); buildChips(v); updateMeta(v); ensureLangs(v); } },
+    h('option', { value: 'English' }, 'English'), ...LANGS.map(l => h('option', { value: l.name }, l.name)), h('option', { value: 'all' }, 'All languages'));
+  langSel.value = v.lang;
   const ownSel = h('select', { id: 'ownSel', onchange: e => { v.own = e.target.value; renderGallery(v); } },
     h('option', { value: 'all' }, 'All printings'), h('option', { value: 'have' }, 'In my collection'), h('option', { value: 'missing' }, 'Not in my collection'), h('option', { value: 'binder' }, 'In the selected binder'), h('option', { value: 'target' }, 'On my target list'));
 
@@ -1591,6 +1825,7 @@ function renderShell(v) {
     h('div', { class: 'controls' },
       h('div', { class: 'row' },
         h('label', { class: 'field', for: 'sortSel' }, 'Order', sort),
+        h('label', { class: 'field', for: 'langSel' }, 'Language', langSel),
         h('label', { class: 'field', for: 'ownSel' }, 'Show', ownSel),
         h('label', { class: 'field', for: 'setSel' }, 'Set', v.el.setSel),
         v.el.formWrap,
@@ -1609,14 +1844,15 @@ async function populate(v) {
     const res = await loadCards(v.sp);
     if (!alive()) return;
     v.cards = res.cards.concat(customsFor(v.id)); v.how = res.how; v.hidden = res.hidden || 0;
-    if (!v.cards.length) {
+    if (!v.cards.length && v.lang === 'English') {
       v.el.meta.textContent = 'No printings found for this Pokémon.' + (v.hidden ? ` (${v.hidden} Pocket cards hidden)` : '');
       return;
     }
     renderGallery(v); updateMeta(v);
-    if (v.cardId) { if (v.cardId.startsWith('p:') && !v.cards.some(c => c.id === v.cardId)) v.wantCard = v.cardId; else openLightbox(v.cardId); }
+    if (v.cardId) { if ((v.cardId.startsWith('p:') || langOfId(v.cardId)) && !v.cards.some(c => c.id === v.cardId)) v.wantCard = v.cardId; else openLightbox(v.cardId); }
     enrich(v);
     supplementPtcg(v);
+    ensureLangs(v);
   } catch (e) {
     if (!alive()) return;
     v.el.meta.textContent = 'Could not load printings.';
@@ -1628,7 +1864,7 @@ async function populate(v) {
 
 async function enrich(v) {
   const alive = () => V === v;
-  if (v.cards.every(c => c.pre)) { buildChips(v); updateMeta(v); return; }
+  if (v.cards.every(c => c.pre)) { buildChips(v); updateMeta(v); return; }  // nothing English left to look up
 
   const needSets = [...new Set(v.cards.filter(c => !c.pre).map(c => c.setId))].filter(id => !S.setMeta[id]);
   if (needSets.length) {
@@ -1686,21 +1922,21 @@ function updateMeta(v) {
     v.el.meta.textContent = parts.join(' · ');
     return;
   }
-  const n = v.cards.length;
-  const sets = new Set(v.cards.map(c => c.setId)).size;
-  const dates = v.cards.map(dateOf).filter(Boolean).sort();
+  const pool = poolOf(v), n = pool.length;
+  const sets = new Set(pool.map(c => c.setId)).size;
+  const dates = pool.map(dateOf).filter(Boolean).sort();
   const parts = [`${n} printing${n === 1 ? '' : 's'}`, `${sets} set${sets === 1 ? '' : 's'}`];
   if (dates.length) {
     const a = dates[0].slice(0, 4), b = dates[dates.length - 1].slice(0, 4);
     parts.push(a === b ? a : `${a}–${b}`);
   }
-  const art = v.cards.filter(c => isArtRare(rarityOf(c))).length;
+  const art = pool.filter(c => isArtRare(rarityOf(c))).length;
   if (art) parts.push(`${art} art rare${art === 1 ? '' : 's'}`);
-  const have = v.cards.filter(c => COL[c.id]).length;
+  const have = pool.filter(c => COL[c.id]).length;
   if (have) parts.push(`${have} in your collection`);
-  const tg = v.cards.filter(c => TGT[c.id]).length;
+  const tg = pool.filter(c => TGT[c.id]).length;
   if (tg) parts.push(`${tg} on your target list`);
-  const bn = activeB(), inb = v.cards.filter(c => inB(bn, c.id)).length;
+  const bn = activeB(), inb = pool.filter(c => inB(bn, c.id)).length;
   if (inb) parts.push(`${inb} in “${bn.name}”`);
   v.el.meta.textContent = parts.join(' · ')
     + (v.how === 'ptcg' ? ' · via Pokémon TCG API' : '')
@@ -1712,7 +1948,7 @@ function buildSetSel(v) {
   const sel = v.el.setSel;
   if (!sel || v.set || !v.cards) return;
   const by = new Map();
-  for (const c of v.cards) {
+  for (const c of poolOf(v)) {
     if (c.custom) continue;
     const e = by.get(c.setId) || { name: setName(c), n: 0, date: dateOf(c) };
     e.n++; by.set(c.setId, e);
@@ -1726,7 +1962,7 @@ function buildFormSel(v) {
   const sel = v.el.formSel;
   if (!sel || v.set || !v.cards) return;
   const n = new Map();
-  for (const c of v.cards) n.set(formOf(c), (n.get(formOf(c)) || 0) + 1);
+  for (const c of poolOf(v)) n.set(formOf(c), (n.get(formOf(c)) || 0) + 1);
   v.el.formWrap.hidden = !(n.size > 1 || (n.size === 1 && !n.has('Regular')));
   const order = ['Regular', 'Alolan', 'Galarian', 'Hisuian', 'Paldean'].filter(f => n.has(f));
   sel.replaceChildren(h('option', { value: '' }, 'All forms'), ...order.map(f => h('option', { value: f }, `${f} (${n.get(f)})`)));
@@ -1738,14 +1974,15 @@ function buildChips(v) {
   buildFormSel(v);
   const counts = new Map();
   let art = 0;
-  for (const c of v.cards) {
+  const pool = v.set ? v.cards : poolOf(v);
+  for (const c of pool) {
     const r = rarityOf(c);
     if (!r) continue;
     counts.set(r, (counts.get(r) || 0) + 1);
     if (isArtRare(r)) art++;
   }
   if (!counts.size) { v.el.chips.replaceChildren(); return; }
-  const items = [['', 'All', v.cards.length]];
+  const items = [['', 'All', pool.length]];
   if (art) items.push(['__art', 'Art rares', art]);
   [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).forEach(([r, n]) => items.push([r, r, n]));
   v.el.chips.replaceChildren(...items.map(([key, label, n]) => h('button', {

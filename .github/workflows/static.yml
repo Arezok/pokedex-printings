@@ -1,10 +1,15 @@
-# Simple workflow for deploying static content to GitHub Pages
+# Deploys the site to GitHub Pages. Before each deploy it builds data/tcgplayer-ja.json
+# (Japanese TCGplayer prices) from tcgcsv.com; if that step fails the site still deploys without it.
 name: Deploy static content to Pages
 
 on:
   # Runs on pushes targeting the default branch
   push:
     branches: ["main"]
+
+  # Refresh Japanese prices every night (09:17 UTC)
+  schedule:
+    - cron: "17 9 * * *"
 
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
@@ -31,6 +36,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build Japanese TCGplayer data
+        continue-on-error: true
+        run: node scripts/build-tcgplayer-ja.mjs data/tcgplayer-ja.json
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact
