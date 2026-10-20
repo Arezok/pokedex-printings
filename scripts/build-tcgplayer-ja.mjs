@@ -2,7 +2,8 @@
 /*
  * Builds data/tcgplayer-ja.json: every Japanese Pokémon single on TCGplayer with its number, rarity and market prices.
  * Source: tcgcsv.com, a free nightly mirror of TCGplayer's catalog. Browsers cannot read tcgcsv directly,
- * so the GitHub Pages workflow runs this before each deploy and ships the result next to index.html.
+ * so the GitHub Pages workflow runs this on Mondays and Fridays (pushes reuse the saved copy) and ships the
+ * result next to index.html. Requests go one at a time with a short pause, per tcgcsv's guidelines.
  *
  *   node scripts/build-tcgplayer-ja.mjs [output path]
  *
@@ -14,12 +15,15 @@ import { dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const BASE = process.env.TCGCSV_BASE || 'https://tcgcsv.com/tcgplayer';
-const UA = 'pokedex-printings (personal binder app; github.com/Arezok/pokedex-printings)';
+const UA = 'pokedex-printings/1.0 (+https://github.com/Arezok/pokedex-printings)';
+const GAP_MS = 100;                       // tcgcsv asks for a ~100 ms pause between requests
+const sleep = ms => new Promise(res => setTimeout(res, ms));
 
 async function getJSON(fetchFn, url, tries = 4) {
   let last;
   for (let i = 0; i < tries; i++) {
     try {
+      await sleep(GAP_MS);
       const r = await fetchFn(url, { headers: { 'User-Agent': UA, Accept: 'application/json' } });
       if (!r.ok) throw new Error(`HTTP ${r.status} for ${url}`);
       const j = await r.json();
@@ -51,12 +55,10 @@ export async function build({ fetchFn = fetch, log = console.log } = {}) {
   log(`${groups.length} groups`);
   const outGroups = {}, cards = [];
   let failed = 0;
-  await pool(groups, 4, async g => {
+  await pool(groups, 1, async g => {           // one request at a time
     try {
-      const [prods, prices] = await Promise.all([
-        getJSON(fetchFn, `${BASE}/${cat.categoryId}/${g.groupId}/products`),
-        getJSON(fetchFn, `${BASE}/${cat.categoryId}/${g.groupId}/prices`)
-      ]);
+      const prods = await getJSON(fetchFn, `${BASE}/${cat.categoryId}/${g.groupId}/products`);
+      const prices = await getJSON(fetchFn, `${BASE}/${cat.categoryId}/${g.groupId}/prices`);
       const byPid = new Map();
       for (const p of results(prices)) {
         if (!p || p.productId == null) continue;

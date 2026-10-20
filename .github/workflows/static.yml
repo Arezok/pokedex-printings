@@ -1,5 +1,6 @@
-# Deploys the site to GitHub Pages. Before each deploy it builds data/tcgplayer-ja.json
-# (Japanese TCGplayer prices) from tcgcsv.com; if that step fails the site still deploys without it.
+# Deploys the site to GitHub Pages with data/tcgplayer-ja.json (Japanese TCGplayer prices from tcgcsv.com).
+# Prices are pulled fresh only on Mondays and Fridays (or when run by hand from the Actions tab);
+# a push reuses the last saved copy, so code changes never cause extra requests to tcgcsv.
 name: Deploy static content to Pages
 
 on:
@@ -7,9 +8,9 @@ on:
   push:
     branches: ["main"]
 
-  # Refresh Japanese prices every night (09:17 UTC)
+  # Refresh Japanese prices on Mondays and Fridays (09:17 UTC = early morning US Eastern)
   schedule:
-    - cron: "17 9 * * *"
+    - cron: "17 9 * * 1,5"
 
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
@@ -40,9 +41,25 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: Restore last Japanese price file
+        id: restore
+        uses: actions/cache/restore@v4
+        with:
+          path: data/tcgplayer-ja.json
+          key: tcgplayer-ja-${{ github.run_id }}
+          restore-keys: tcgplayer-ja-
+      # fresh pull only on the Monday/Friday schedule, a manual run, or if no saved copy exists yet
       - name: Build Japanese TCGplayer data
+        id: build
+        if: github.event_name != 'push' || steps.restore.outputs.cache-matched-key == ''
         continue-on-error: true
         run: node scripts/build-tcgplayer-ja.mjs data/tcgplayer-ja.json
+      - name: Save Japanese price file
+        if: steps.build.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: data/tcgplayer-ja.json
+          key: tcgplayer-ja-${{ github.run_id }}
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact
