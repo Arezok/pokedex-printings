@@ -95,11 +95,13 @@ h1{margin:0;font:700 28px/1.05 var(--f-display);letter-spacing:-.02em}
 .tile .nm{max-width:100%;font:600 13px/1.25 var(--f-body);text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* pokemon page */
-.crumbs{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:14px;margin-bottom:16px}
+.crumbs{position:sticky;top:var(--barh,60px);z-index:15;display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:14px;margin:0 0 16px;padding:8px 0;background:var(--bg);border-bottom:1px solid var(--line)}
 .crumbs a{text-decoration:none;color:var(--muted);font-weight:500}
 .crumbs a:hover{color:var(--ink)}
 .crumbs .back{color:var(--ink);font-weight:600}
 .crumbs .pn{display:flex;gap:16px;min-width:0}
+.crumbs .pn a{min-width:0;max-width:42vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.crumbs .mid{flex:1;min-width:0;text-align:center;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .hero{display:flex;align-items:center;gap:18px;margin-bottom:18px}
 .hero-art{width:112px;height:112px;object-fit:contain;flex:none}
 .dexno{margin:0 0 4px;font:500 12px/1 var(--f-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
@@ -871,6 +873,9 @@ function refreshTileBadges() { for (const sp of S.species) sp.tile.classList.tog
 
 /* custom printings behave like any other card */
 const customImg = id => IMGS.get(id) || (CUS[id] && CUS[id].u) || '';
+const ovKey = id => 'ov:' + id;
+const ovImg = c => (c && !c.custom && IMGS.get(ovKey(c.id))) || '';   // a picture I supplied for a card that has no good scan
+const recImg = (id, r) => (r.cu ? customImg(id) : (IMGS.get(ovKey(id)) || r.th));
 function customCard(id) {
   const r = CUS[id], img = customImg(id) || null;
   return {
@@ -1197,6 +1202,7 @@ function deleteCustom(v, c) {
 function exportAll() {
   const images = {};
   for (const id of Object.keys(CUS)) if (IMGS.has(id)) images[id] = IMGS.get(id);
+  for (const [k, v] of IMGS) if (k.startsWith('ov:')) images[k] = v;      // pictures I supplied for database cards
   const data = {
     app: 'pokedex-printings', version: 2, exported: new Date().toISOString(),
     collection: COL, targets: TGT, binders: BND.list, active: BND.active, custom: CUS, images
@@ -1232,7 +1238,7 @@ function importFile(e) {
       if (v2) {
         for (const [id, r] of Object.entries(data.custom || {})) { const c = cleanCus(r); if (c && (!CUS[id] || c.t > CUS[id].t)) CUS[id] = c; }
         for (const [id, img] of Object.entries(data.images || {})) {
-          if (CUS[id] && typeof img === 'string' && /^data:image\//.test(img) && !IMGS.has(id)) await ImgStore.put(id, img);
+          if ((CUS[id] || /^ov:[^\s]{1,80}$/.test(id)) && typeof img === 'string' && /^data:image\//.test(img) && !IMGS.has(id)) await ImgStore.put(id, img);
         }
         for (const raw of Array.isArray(data.binders) ? data.binders : []) {
           const b = cleanBinder(raw);
@@ -1818,6 +1824,7 @@ function renderShell(v) {
   $('#poke').replaceChildren(
     h('nav', { class: 'crumbs', 'aria-label': 'Pokémon navigation' },
       h('a', { class: 'back', href: '#/' }, '← All Pokémon'),
+      h('span', { class: 'mid', 'aria-hidden': 'true' }, `${pad(sp.id)} ${sp.name}`),
       h('span', { class: 'pn' },
         prev ? h('a', { href: '#/p/' + prev.id, rel: 'prev' }, '‹ ' + prev.name) : null,
         next ? h('a', { href: '#/p/' + next.id, rel: 'next' }, next.name + ' ›') : null)),
@@ -2006,8 +2013,8 @@ function renderGallery(v) {
 
 function pocket(v, c) {
   const alt = `${c.name}, ${setName(c)} ${c.localId}`;
-  const art = c.thumb
-    ? (() => { const l = pickList(c, 'thumbs') || [c.thumb, c.thumbAlt, c.thumbAlt2];
+  const art = c.thumb || ovImg(c)
+    ? (() => { const l = [ovImg(c), ...(pickList(c, 'thumbs') || [c.thumb, c.thumbAlt, c.thumbAlt2])].filter(Boolean);
         return h('img', { src: l[0], alt, width: 245, height: 337, loading: 'lazy', decoding: 'async', onerror: chainErr(l, c.name, numLabel(c)) }); })()
     : h('div', { class: 'noimg' }, h('span', null, c.name), h('small', null, 'No image'));
   const cap = h('span', { class: 'cap' });
@@ -2057,12 +2064,38 @@ function openLightbox(cardId) {
   document.documentElement.classList.add('lb-open');
   lb.scrollTop = 0;
 
-  const drawLbImg = () => $('#lbImg').replaceChildren(c.full
-    ? (() => { const l = pickList(c, 'fulls') || [c.full, c.fullAlt, c.fullAlt2];
+  const drawLbImg = () => $('#lbImg').replaceChildren(c.full || ovImg(c)
+    ? (() => { const l = [ovImg(c), ...(pickList(c, 'fulls') || [c.full, c.fullAlt, c.fullAlt2])].filter(Boolean);
         return h('img', { src: l[0], alt: `${c.name}, ${setName(c)} ${numLabel(c)}`, onerror: chainErr(l, c.name, numLabel(c)) }); })()
     : h('div', { class: 'noimg' }, h('span', null, c.name), h('small', null, 'No image')));
   drawLbImg();
   const nPics = (c.fulls || []).length;
+  const refreshTile = () => {
+    const l = [ovImg(c), ...(pickList(c, 'thumbs') || [c.thumb, c.thumbAlt, c.thumbAlt2])].filter(Boolean), pk = v.pockets.get(c.id);
+    if (pk) { const im = pk.querySelector('.art > img, .art > .noimg'); if (im) im.replaceWith(h('img', { src: l[0], alt: c.name, width: 245, height: 337, decoding: 'async', onerror: chainErr(l, c.name, numLabel(c)) })); }
+  };
+  const ownFile = c.custom ? null : h('input', {
+    type: 'file', id: 'lbOwnFile', accept: 'image/*', hidden: true,
+    onchange: async e => {
+      const fl = e.target.files && e.target.files[0];
+      e.target.value = '';
+      if (!fl) return;
+      try {
+        const data = await shrinkImage(fl);
+        if (V !== v) return;
+        const kept = await ImgStore.put(ovKey(c.id), data);
+        drawLbImg(); refreshTile(); refreshLbPicBtns();
+        toast(kept ? 'Using your picture for this card.' : 'Using your picture, but this browser has no room to keep it after you close the page.');
+      } catch { toast('Could not read that photo. Try a JPG or PNG.'); }
+    }
+  });
+  const ownBtn = c.custom ? null : h('button', { type: 'button', id: 'lbOwn', class: 'btn ghost', onclick: () => ownFile.click() }, 'Use my own picture');
+  const ownDel = c.custom ? null : h('button', {
+    type: 'button', id: 'lbOwnDel', class: 'btn ghost',
+    onclick: async () => { await ImgStore.del(ovKey(c.id)); if (V !== v) return; drawLbImg(); refreshTile(); refreshLbPicBtns(); toast('Back to the database picture.'); }
+  }, 'Remove my picture');
+  const refreshLbPicBtns = () => { if (ownDel) ownDel.hidden = !ovImg(c); if (ownBtn) ownBtn.textContent = ovImg(c) ? 'Replace my picture' : 'Use my own picture'; };
+  refreshLbPicBtns();
   const otherPic = nPics > 1 ? h('button', {
     type: 'button', id: 'lbPic', class: 'btn ghost',
     onclick: () => {
@@ -2108,7 +2141,7 @@ function openLightbox(cardId) {
       h('button', { type: 'button', id: 'lbTgt', class: 'btn ghost', onclick: () => toggleTgt(v, c) }),
       BND.list.length > 1 ? binderSelect() : null,
       c.custom ? null : h('a', { class: 'btn ghost', href: tcgUrl(c), target: '_blank', rel: 'noopener noreferrer' }, c.tcgUrl ? 'View on TCGplayer ↗' : 'Search TCGplayer ↗'),
-      otherPic,
+      otherPic, ownBtn, ownDel, ownFile,
       nPics > 1 ? h('button', {
         type: 'button', id: 'lbPref', class: 'btn ghost',
         onclick: e => {
@@ -2188,6 +2221,11 @@ $('#lbClose').addEventListener('click', lbClose);
 $('#lbPrev').addEventListener('click', () => lbStep(-1));
 $('#lbNext').addEventListener('click', () => lbStep(1));
 $('#lb').addEventListener('click', e => { if (e.target === $('#lb')) lbClose(); });
+const setBarH = () => document.documentElement.style.setProperty('--barh', ($('#bar').offsetHeight || 60) + 'px');
+setBarH();
+addEventListener('resize', setBarH);
+if (typeof ResizeObserver === 'function') new ResizeObserver(setBarH).observe($('#bar'));
+
 document.addEventListener('keydown', e => {
   if (document.getElementById('cf')) {   // the add-a-printing form is open
     if (e.key === 'Escape') { e.preventDefault(); closeCardForm(); }
@@ -2201,6 +2239,12 @@ document.addEventListener('keydown', e => {
     return;
   }
   if (e.key === '/' && mode === 'home' && document.activeElement !== $('#q')) { e.preventDefault(); $('#q').focus(); }
+  /* arrow keys step through the Pokédex on a Pokémon page */
+  if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && mode === 'poke' && V && !V.set && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey
+      && !/^(INPUT|SELECT|TEXTAREA)$/.test((e.target && e.target.tagName) || '')) {
+    const a = document.querySelector(`.crumbs a[rel="${e.key === 'ArrowLeft' ? 'prev' : 'next'}"]`);
+    if (a) { e.preventDefault(); location.hash = a.getAttribute('href'); }
+  }
 });
 let tx = null;
 $('#lbPanel').addEventListener('touchstart', e => { tx = e.touches.length === 1 ? e.touches[0].clientX : null; }, { passive: true });
@@ -2252,7 +2296,7 @@ function binderItems(b) {
 
 function slotFor(it) {
   if (it.rec) {
-    const r = it.rec, img = r.cu ? customImg(it.id) : r.th;
+    const r = it.rec, img = recImg(it.id, r);
     return h('a', { class: 'slot filled', href: recHref(it.id, r), title: `${r.n} · ${r.s} ${r.no}` },
       img ? h('img', { src: img, alt: `${r.n}, ${r.s} ${r.no}`, loading: 'lazy', decoding: 'async', onerror: r.cu ? null : chainErr(recUrls(r), r.n, r.no) }) : h('span', { class: 'slot-txt' }, r.n),
       h('span', { class: 'sl-no' }, pad(r.d)));
@@ -2400,7 +2444,7 @@ function collectionView() {
 }
 
 function colTile(r) {
-  const img = r.cu ? customImg(r.id) : r.th;
+  const img = recImg(r.id, r);
   const inN = BND.list.filter(b => inB(b, r.id)).length;
   return h('div', { class: 'pocket owned' },
     h('a', { class: 'pk-link', href: recHref(r.id, r) },
@@ -2471,7 +2515,7 @@ function targetsView() {
 }
 
 function tgtTile(r) {
-  const img = r.cu ? customImg(r.id) : r.th;
+  const img = recImg(r.id, r);
   return h('div', { class: 'pocket' },
     h('a', { class: 'pk-link', href: recHref(r.id, r) },
       h('span', { class: 'art' }, img
